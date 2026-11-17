@@ -16,6 +16,7 @@
 ### Mesh and the map
 - Now, at the top of the battery's sheet (tap the battery tile), is the radio's last reading as it took it, no longer the mean of the last half hour, so a board's `adc.multiplier` can be tuned against a meter. When the two differ, the mean the charge is counted from is written under it.
 - The box that asks before a survey goes to a coverage map fits a narrow phone again: its words wrap, and the send button, whose name is the map's address, takes a second line instead of dragging the sheet sideways and carrying the cross of its head out of reach.
+- Ommesh's own coverage map now lives at nw.ommesh.ru: the sheet that sends a survey says the new address and sends it there.
 
 ## 0.12.0 — 2026-11-06
 
