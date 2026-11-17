@@ -25,9 +25,9 @@ export const COVERAGE_MAPS: CoverageMap[] = [
   {
     id: "ommesh",
     name: "Ommesh",
-    host: "agent.ommesh.ru",
-    uploadUrl: "https://agent.ommesh.ru/wardrive/samples",
-    siteUrl: "https://agent.ommesh.ru/",
+    host: "nw.ommesh.ru",
+    uploadUrl: "https://nw.ommesh.ru/wardrive/samples",
+    siteUrl: "https://nw.ommesh.ru/",
     protocol: "wardrive",
     ours: true,
     anySite: true,
