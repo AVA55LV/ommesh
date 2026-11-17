@@ -313,6 +313,9 @@
 /* Before a survey goes to a coverage map: where it goes, and that everyone will see it. */
 .survey-agree {
   display: grid;
+  /* One column, and never wider than the box it is in: a phone narrower than the words inside must not stretch
+     the box and take the sheet sideways with it (the cross of the head would scroll out of reach). */
+  grid-template-columns: minmax(0, 1fr);
   gap: var(--space-3);
   padding: var(--space-3);
   border-radius: var(--radius-lg);
@@ -321,6 +324,21 @@
 .survey-agree p {
   margin: 0;
   font-size: var(--text-sm);
+  /* A map's address is part of these words and is nobody's to keep short. */
+  overflow-wrap: anywhere;
+}
+/* The two answers stay on one line, and the words of the send button take a second line when the box is
+   narrower than "Отправить на agent.ommesh.ru": the buttons give way instead of pushing the sheet sideways.
+   Each keeps the width its words ask for while they fit, so a usual phone shows the pair as one line. */
+.survey-agree .tool-actions .button {
+  flex: 1 1 auto;
+  height: auto;
+  min-height: var(--control-h);
+  padding-block: var(--space-1);
+  white-space: normal;
+  /* break-word, not anywhere: a word here is only ever broken when it cannot fit, and never asks the button to
+     be narrower than it is, so "Отмена" keeps its width. */
+  overflow-wrap: break-word;
 }
 /* In the confirm box: whether the radio puts its name to the survey, its name and key under it. */
 .survey-sign {
@@ -345,9 +363,12 @@
   flex: 1;
   display: flex;
   flex-direction: column;
+  min-width: 0;
 }
 .survey-sign small {
   color: var(--text-muted);
+  /* A radio's name is its own to choose and can be one long word. */
+  overflow-wrap: anywhere;
 }
 /* Under "who hears me": the surveys kept. */
 .survey-more {
