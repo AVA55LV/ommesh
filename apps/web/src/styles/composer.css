@@ -328,12 +328,28 @@
   gap: 4px;
   background: var(--selected);
 }
+/*
+ * Who can be named: every name that fits the letters typed, five of them in sight
+ * and the rest scrolled. A channel of a hundred writers used to draw them all, so
+ * the list ran off the top of the screen, up under the chat's head, and the names
+ * past the first few were out of reach. The name the arrows have come to is
+ * scrolled into sight by the composer.
+ *
+ * A row is a 24px circle with 6px above and below it, so five rows and the box's
+ * padding and border make 190px; a screen too short for that, a phone on its side
+ * with the keyboard up, takes a share of itself instead.
+ */
 .compose-pop {
   position: absolute;
   left: var(--space-2);
   bottom: 100%;
   z-index: 5;
   width: min(320px, calc(100% - 2 * var(--space-2)));
+  max-height: min(190px, 45dvh);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  /* A row brought into sight by the arrows keeps the box's own padding around it. */
+  scroll-padding-block: 4px;
   padding: 4px;
   border: 1px solid var(--border-strong);
   border-radius: var(--radius-lg);

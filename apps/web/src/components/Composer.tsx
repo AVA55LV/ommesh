@@ -142,7 +142,14 @@ export function Composer({ conversation, title, reply, onReplyDone, onSent }: { 
     () => (many ? mentionable(messages.filter((m) => !isHidden(m)), Object.values(state.contacts), self?.name ?? "") : []),
     [many, messages, state.contacts, self?.name],
   );
-  const matches = pick ? findNames(people, pick.query).slice(0, 6) : [];
+  const matches = pick ? findNames(people, pick.query) : [];
+  // The list of who can be named shows five names and scrolls for the rest (composer.css): the row
+  // the arrows have come to may be below its edge, and it comes into sight as it changes.
+  const choices = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (!pick) return;
+    choices.current?.querySelector<HTMLElement>(".on")?.scrollIntoView({ block: "nearest" });
+  }, [pick]);
 
   useEffect(() => setDraft(radio, conversation, text.slice(head.length)), [radio, conversation, text, head]);
   // The more letters are swapped for one message; another chat, or an empty field, starts afresh.
@@ -649,7 +656,7 @@ export function Composer({ conversation, title, reply, onReplyDone, onSent }: { 
   return (
     <footer className={["compose", focused ? "focus" : "", text || reply || place ? "has" : "", online ? "" : "waiting", shake ? "shake" : ""].join(" ")} onAnimationEnd={() => setShake(false)}>
       {matches.length > 0 && pick ? (
-        <div className="compose-pop" role="listbox" aria-label={t("chats.composer.mention")}>
+        <div className="compose-pop" role="listbox" aria-label={t("chats.composer.mention")} ref={choices}>
           {matches.map((who, i) => (
             <button
               key={who}
