@@ -50,9 +50,9 @@ const K0 = 0.9996;
 const FALSE_EASTING = 500_000;
 const FALSE_NORTHING = 10_000_000;
 
-/** The zone a longitude falls in. */
+/** The zone a longitude falls in: one to sixty, as the longitude wraps. */
 function zoneOf(lon: number): number {
-  return Math.floor((lon + 180) / 6) + 1;
+  return Math.min(60, Math.floor((lon + 180) / 6) + 1);
 }
 
 /** A place on a zone's plane, metres east and north of the zone's false origin. */
