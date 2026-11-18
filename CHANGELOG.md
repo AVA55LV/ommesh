@@ -5,6 +5,7 @@
 ## Unreleased
 
 ### Chats
+- Attach a photo or a file by pasting it from the clipboard: copy a screenshot, or a file in the file manager, and press Ctrl+V (⌘V on a Mac) in the message field. The attachment goes to the bucket as the clip's own does, and a link lands in the field; several files copied at once go one after another, each with its link.
 - A bucket of your own that sits in the path of an address, the way a MinIO behind a proxy does, is now said so with a switch on the attachments server page: the app cannot tell it from a bucket with a name of its own when both are on the web's own port.
 - A link too long for a message can be shortened instead of cut: when a message with a link goes over what a radio carries, the line above the field offers Shorten, and the preview server's six letters take the place of the long address. The short link lives a day, and the offer says so; with link previews off, nothing is sent to the server and the message is offered in parts as before.
 - Photos and files in a chat: hold the clip beside Send and choose Photo or File. The picture or document goes into your own S3 bucket, and the message carries a link that this app draws as a picture or a file card, while other MeshCore apps show it as a link. Settings › Attachments holds the bucket and a Test that writes a byte and reads it back; nothing leaves the device until it is set, and the secret stays on this device alone. Photos are squeezed to 1600 px and about 400 KB, files go up to 25 MB as they are.
