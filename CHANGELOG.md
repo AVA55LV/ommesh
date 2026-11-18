@@ -5,6 +5,7 @@
 ## Unreleased
 
 ### Chats
+- The list of who can be named with @ in a channel or a room scrolls: five names show at once, and everyone else who wrote there or is among your contacts is a scroll away, the arrow keys bringing each into sight. It used to stop at six names, and the rest could not be reached at all.
 - Attach a photo or a file by pasting it from the clipboard: copy a screenshot, or a file in the file manager, and press Ctrl+V (⌘V on a Mac) in the message field. The attachment goes to the bucket as the clip's own does, and a link lands in the field; several files copied at once go one after another, each with its link.
 - A bucket of your own that sits in the path of an address, the way a MinIO behind a proxy does, is now said so with a switch on the attachments server page: the app cannot tell it from a bucket with a name of its own when both are on the web's own port.
 - A link too long for a message can be shortened instead of cut: when a message with a link goes over what a radio carries, the line above the field offers Shorten, and the preview server's six letters take the place of the long address. The short link lives a day, and the offer says so; with link previews off, nothing is sent to the server and the message is offered in parts as before.
