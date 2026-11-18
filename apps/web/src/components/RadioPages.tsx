@@ -1034,7 +1034,6 @@ function AttachmentsPage() {
       <Group note={t("radio.attachments.note")}>
         <SwitchRow label={t("radio.attachments.enabled")} hint={t("radio.attachments.enabledHint")} checked={s.enabled} onChange={(v) => setAttachments({ enabled: v })} />
         <LinkRow label={t("radio.attachments.server")} value={hostOf(s) || undefined} onClick={() => push({ kind: "radio", page: "attachmentsServer" })} />
-        <SwitchRow label={t("radio.attachments.squeeze")} hint={t("radio.attachments.squeezeHint")} checked={s.compressPhotos} onChange={(v) => setAttachments({ compressPhotos: v })} />
         <InfoRow label={t("radio.attachments.files")}>{t("radio.attachments.filesValue")}</InfoRow>
       </Group>
       {s.enabled && !ready ? <Group note={t("radio.attachments.incomplete")}>{null}</Group> : null}

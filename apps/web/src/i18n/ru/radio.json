@@ -298,8 +298,6 @@
   "attachments.enabled": "Фото и файлы",
   "attachments.enabledHint": "Кнопка появляется в поле сообщения. В эфир уходит только ссылка, файлы — в вашу корзину.",
   "attachments.server": "Сервер",
-  "attachments.squeeze": "Сжимать фото",
-  "attachments.squeezeHint": "1600 px и около 400 КБ; файлы едут как есть.",
   "attachments.files": "Файлы",
   "attachments.filesValue": "до 25 МБ",
   "attachments.note": "Секрет остаётся на этом устройстве: в резервную копию он не входит и на другие устройства не пересылается. Подпись загрузки считается здесь же.",

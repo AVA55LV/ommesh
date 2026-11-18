@@ -298,8 +298,6 @@
   "attachments.enabled": "Photos and files",
   "attachments.enabledHint": "The clip appears in the message field. Only a link rides the radio; files go to your bucket.",
   "attachments.server": "Server",
-  "attachments.squeeze": "Squeeze photos",
-  "attachments.squeezeHint": "1600 px and about 400 KB; files go as they are.",
   "attachments.files": "Files",
   "attachments.filesValue": "up to 25 MB",
   "attachments.note": "The secret stays on this device: it is not in the backup and not sent to other devices. Each upload is signed here.",

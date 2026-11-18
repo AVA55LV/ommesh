@@ -24,8 +24,6 @@ export interface AttachmentsSettings {
   secretKey: string;
   /** Where the file is read from, such as https://i.example.ru. Empty: the endpoint and the bucket. */
   publicBase: string;
-  /** Photos are squeezed to 1600 px and about 400 KB; files go as they are. */
-  compressPhotos: boolean;
   /**
    * Whether the bucket sits in the path (`host/bucket/key`) rather than in the
    * host (`bucket.host/key`). Unset is auto: a port or an address in the
@@ -43,7 +41,6 @@ export const ATTACH_DEFAULTS: AttachmentsSettings = {
   accessKey: "",
   secretKey: "",
   publicBase: "",
-  compressPhotos: true,
 };
 
 /** The reader's own bucket, on this device only. */
