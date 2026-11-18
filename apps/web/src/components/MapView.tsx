@@ -17,12 +17,14 @@
  * radio there. Nothing here asks the air for anything.
  */
 
-import { LngLatBounds, Map as MapLibre, Marker } from "maplibre-gl";
+import { LngLatBounds, Map as MapLibre, Marker, type GeoJSONSource } from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import { AdvType, type ContactRecord } from "@meshnet/meshcore";
 import { t } from "../i18n/index.js";
 import { courseStep, destination, distanceKm, formatRoundDistance, hasPosition, metresPerPixel, scaleBar } from "../lib/geo.js";
+import { cellOf, cellPolygon, levelAt, tilesAt } from "../lib/coverage/tiles.js";
+import type { PointTone, SurveyPoint } from "../lib/surveyData.js";
 import { EMPTY_OVERLAY, type MapDot, type MapHandle, type MapOverlay } from "../lib/mapOverlay.js";
 import type { LosEnd } from "../lib/meshTool.js";
 import { NodeCanvas, type LatLon } from "../lib/nodeCanvas.js";
@@ -54,10 +56,52 @@ function selfHtml(name: string): string {
   return `<span class="map-self-pulse"></span><span class="map-self-dot"></span><span class="map-name">${escapeHtml(name)}</span>`;
 }
 
-/** The phone: a hollow ring, apart from this radio's filled dot; unnamed under the radio's own name when the two are together. */
+/** The phone: a hollow ring standing still, an arrow turned with its course on the move, under this radio's dot when the two are together. */
 function phoneHtml(named: boolean): string {
   const name = named ? `<span class="map-name">${escapeHtml(t("mesh.map.phone"))}</span>` : "";
-  return `<span class="map-phone-ring"></span>${name}`;
+  return `<span class="map-phone-ring"></span><span class="map-phone-arrow"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2.2 19.6 21 12 16.7 4.4 21z"></path></svg></span>${name}`;
+}
+
+/** A theme token's colour as it stands: what the stylesheets put there for this appearance. */
+function cssColour(token: string): string {
+  return getComputedStyle(document.documentElement).getPropertyValue(token).trim();
+}
+
+/** How solid a tile's wash is: the light theme's map takes a little more of it than the dark one's. */
+function toneFill(tone: PointTone, dark: boolean): number {
+  if (tone === "none") return dark ? 0.16 : 0.2;
+  return dark ? 0.36 : 0.42;
+}
+
+const NO_FEATURES = { type: "FeatureCollection" as const, features: [] };
+
+/** A survey's tiles as a map source: each with its colour, how solid, and how strong its edge. */
+function cellsGeoJson(points: readonly SurveyPoint[], size: number) {
+  const dark = darkTheme();
+  // The theme's colours, read once for the whole lot: a survey holds hundreds of tiles.
+  const colours: Record<PointTone, string> = {
+    good: cssColour("--success"),
+    fair: cssColour("--warning"),
+    weak: cssColour("--danger"),
+    none: cssColour("--text-faint"),
+  };
+  return {
+    type: "FeatureCollection" as const,
+    features: tilesAt(points, size).map((tile) => ({
+      type: "Feature" as const,
+      geometry: { type: "Polygon" as const, coordinates: [cellPolygon(tile, size)] },
+      properties: { color: colours[tile.tone], opacity: toneFill(tile.tone, dark), line: tile.tone === "none" ? 0.4 : 0.65 },
+    })),
+  };
+}
+
+/** The one tile the phone stands in, made a ring of its own on the map. */
+function cellGeoJson(lat: number, lon: number, size: number) {
+  const cell = cellOf(lat, lon, size);
+  return {
+    type: "FeatureCollection" as const,
+    features: [{ type: "Feature" as const, geometry: { type: "Polygon" as const, coordinates: [cellPolygon(cell, size)] }, properties: {} }],
+  };
 }
 
 /** The button under the phone's ring; the marker has no size, and the button hangs from its point. */
@@ -253,6 +297,12 @@ export interface MapProps {
   onLocate?: (() => Promise<{ lat: number; lon: number } | null>) | undefined;
   /** A coverage survey's points, the one opened ringed; a tap on one hands up its place. */
   dots?: MapDot[] | null | undefined;
+  /**
+   * The same survey's points again, for the tiles they fill: the squares of
+   * 200 m the coverage map draws, coloured by the best answer in each, with
+   * the one the phone stands in ringed.
+   */
+  tiles?: SurveyPoint[] | null | undefined;
   pickedDot?: number | null | undefined;
   onDot?: ((index: number) => void) | undefined;
   /**
@@ -398,7 +448,7 @@ function groupingWanted(): boolean {
 /** Where the map was left, so coming back to it, from a profile or another section, finds it there, turned as it was. */
 let lastView: { center: [number, number]; zoom: number; bearing: number } | null = null;
 
-export default function MapView({ selected, onSelect, onGroup, filter, coverBottom = 0, coverTop = 0, coverRight = 0, zoomButtons = false, overlay = EMPTY_OVERLAY, onLeg, onHold, onHandleDrop, onHears, hearsOn = false, onHearsHold, fit = null, phone = null, putHere = null, onLocate, dots = null, pickedDot = null, onDot, follow = null, recording = false, top = null }: MapProps) {
+export default function MapView({ selected, onSelect, onGroup, filter, coverBottom = 0, coverTop = 0, coverRight = 0, zoomButtons = false, overlay = EMPTY_OVERLAY, onLeg, onHold, onHandleDrop, onHears, hearsOn = false, onHearsHold, fit = null, phone = null, putHere = null, onLocate, dots = null, tiles = null, pickedDot = null, onDot, follow = null, recording = false, top = null }: MapProps) {
   const state = useSession();
   const box = useRef<HTMLDivElement>(null);
   const map = useRef<MapLibre | null>(null);
@@ -407,6 +457,14 @@ export default function MapView({ selected, onSelect, onGroup, filter, coverBott
   const selfMarker = useRef<Marker | null>(null);
   const phoneMarker = useRef<Marker | null>(null);
   const putMarker = useRef<Marker | null>(null);
+  // Whether the phone goes, which a circle or an arrow says; and the way it goes, which turns the arrow.
+  const [phoneMoving, setPhoneMoving] = useState(false);
+  const movingNow = useRef(false);
+  const courseNow = useRef<number | null>(null);
+  // The survey whose tiles are drawn, and the phone's place in them; the drawing itself lives in the map's effect.
+  const surveyPoints = useRef<SurveyPoint[] | null>(tiles);
+  const surveyPhone = useRef<{ lat: number; lon: number } | null>(null);
+  const paintSurvey = useRef<() => void>(() => {});
   // Markers the overlay brings: pins, the labels of legs, a route's handles.
   const overlayMarkers = useRef<Marker[]>([]);
   const fitted = useRef(false);
@@ -467,6 +525,12 @@ export default function MapView({ selected, onSelect, onGroup, filter, coverBott
     const pad = clear ? padding() : { top: 0, bottom: 0, left: 0, right: 0 };
     return p.x >= pad.left - 2 && p.x <= x - pad.right + 2 && p.y >= pad.top - 2 && p.y <= y - pad.bottom + 2;
   };
+  /** The phone's arrow points the way it goes, whichever way the map is turned; a standing circle has no way. */
+  const spinPhone = () => {
+    const el = phoneMarker.current?.getElement();
+    if (!el) return;
+    el.style.setProperty("--course", `${(courseNow.current ?? 0) - (map.current?.getBearing() ?? 0)}deg`);
+  };
 
   const placed = useMemo(() => Object.values(contacts).filter((c) => hasPosition(c.lat, c.lon)).sort((a, b) => (a.key < b.key ? -1 : 1)), [contacts]);
   // The nodes the lines lead to are drawn whatever the filter, and never gathered into a circle (#99): a line to
@@ -508,6 +572,57 @@ export default function MapView({ selected, onSelect, onGroup, filter, coverBott
     const nodeCanvas = new NodeCanvas(m, canvasBox);
     layer.current = overlayLayer;
     nodes.current = nodeCanvas;
+
+    // The survey's tiles, drawn under the nodes and the lines: the squares of the coverage map at the size this
+    // zoom calls for, coloured by the best answer in each, and the one tile the phone stands in.
+    const paintSurveyNow = () => {
+      const size = levelAt(m.getZoom(), m.getCenter().lat);
+      const cells = m.getSource("survey-cells") as GeoJSONSource | undefined;
+      if (cells) cells.setData(surveyPoints.current ? cellsGeoJson(surveyPoints.current, size) : NO_FEATURES);
+      const now = m.getSource("survey-now") as GeoJSONSource | undefined;
+      if (now) {
+        const at = surveyPhone.current;
+        now.setData(at ? cellGeoJson(at.lat, at.lon, size) : NO_FEATURES);
+      }
+      if (m.getLayer("survey-now-line")) {
+        m.setPaintProperty("survey-now-casing", "line-color", cssColour("--bg"));
+        m.setPaintProperty("survey-now-line", "line-color", cssColour("--text"));
+      }
+    };
+    paintSurvey.current = paintSurveyNow;
+    m.on("load", () => {
+      m.addSource("survey-cells", { type: "geojson", data: NO_FEATURES });
+      m.addLayer({
+        id: "survey-cells-fill",
+        type: "fill",
+        source: "survey-cells",
+        paint: { "fill-color": ["get", "color"], "fill-opacity": ["get", "opacity"] },
+      });
+      m.addLayer({
+        id: "survey-cells-line",
+        type: "line",
+        source: "survey-cells",
+        paint: {
+          "line-color": ["get", "color"],
+          "line-opacity": ["get", "line"],
+          "line-width": ["interpolate", ["linear"], ["zoom"], 10, 1.4, 15, 0.7],
+        },
+      });
+      m.addSource("survey-now", { type: "geojson", data: NO_FEATURES });
+      m.addLayer({
+        id: "survey-now-casing",
+        type: "line",
+        source: "survey-now",
+        paint: { "line-color": cssColour("--bg"), "line-width": 6, "line-opacity": 0.92 },
+      });
+      m.addLayer({
+        id: "survey-now-line",
+        type: "line",
+        source: "survey-now",
+        paint: { "line-color": cssColour("--text"), "line-width": 3 },
+      });
+      paintSurveyNow();
+    });
 
     // The finger lifting after a long press is not a tap on the map as well, however long it stayed down.
     let heldAt = 0;
@@ -612,11 +727,16 @@ export default function MapView({ selected, onSelect, onGroup, filter, coverBott
         lastView = { center: [c.lng, c.lat], zoom: m.getZoom(), bearing: m.getBearing() };
       }
     });
-    m.on("zoomend", () => setZoom(m.getZoom()));
+    m.on("zoomend", () => {
+      setZoom(m.getZoom());
+      // A coarse grid gives way to a finer one as the map closes in.
+      paintSurveyNow();
+    });
     const turn = () => {
       const b = m.getBearing();
       setTurned(Math.abs(b) >= 0.5);
       if (needle.current) needle.current.style.transform = `rotate(${-b}deg)`;
+      spinPhone();
     };
     m.on("rotate", turn);
     // A hand on the map lets go of the phone it followed, until "where am I". While it follows, a pinch, a wheel
@@ -650,11 +770,13 @@ export default function MapView({ selected, onSelect, onGroup, filter, coverBott
     // The pane is sized by the layout, which changes when a phone turns or a desktop window is resized.
     const resize = new ResizeObserver(() => m.resize());
     resize.observe(el);
-    // The tiles are turned over for a dark theme by the map itself; the nodes are coloured when drawn.
+    // The tiles are turned over for a dark theme by the map itself; the nodes are coloured when drawn, and a
+    // survey's tiles are coloured again, as they take the theme's green, amber and red.
     const theme = new MutationObserver(() => {
       const paint = tilePaint(darkTheme());
       if (m.getLayer("osm")) for (const [key, value] of Object.entries(paint)) m.setPaintProperty("osm", key, value);
       nodeCanvas.redraw();
+      paintSurveyNow();
     });
     theme.observe(document.documentElement, { attributes: true, attributeFilter: ["data-appearance"] });
     // The names are measured in the app's font, which may arrive after the first paint.
@@ -678,6 +800,7 @@ export default function MapView({ selected, onSelect, onGroup, filter, coverBott
       phoneMarker.current = null;
       putMarker.current = null;
       overlayMarkers.current = [];
+      paintSurvey.current = () => {};
       fitted.current = false;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -723,17 +846,33 @@ export default function MapView({ selected, onSelect, onGroup, filter, coverBott
     if (phoneLat === null || phoneLon === null || phoneAccuracy === null) {
       phoneMarker.current?.remove();
       phoneMarker.current = null;
+      surveyPhone.current = null;
       layer.current?.setHalo(null, 0);
+      paintSurvey.current();
       return;
     }
+    surveyPhone.current = { lat: phoneLat, lon: phoneLon };
     if (!phoneMarker.current) phoneMarker.current = new Marker({ element: element("map-phone", phoneHtml(phoneNamed), [16, 16]) }).setLngLat([phoneLon, phoneLat]).addTo(m);
     else phoneMarker.current.setLngLat([phoneLon, phoneLat]);
+    phoneMarker.current.getElement().classList.toggle("moving", phoneMoving);
     layer.current?.setHalo({ lat: phoneLat, lon: phoneLon }, phoneAccuracy);
+    paintSurvey.current();
+    spinPhone();
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [phoneLat, phoneLon, phoneAccuracy]);
+  // Standing still the phone is a circle, going it is an arrow: its course turns the arrow, not the circle.
+  useEffect(() => {
+    phoneMarker.current?.getElement().classList.toggle("moving", phoneMoving);
+    spinPhone();
+  }, [phoneMoving]);
+  useEffect(() => {
+    surveyPoints.current = tiles;
+    paintSurvey.current();
+  }, [tiles]);
   useEffect(() => {
     const el = phoneMarker.current?.getElement();
     if (el) el.innerHTML = phoneHtml(phoneNamed);
+    spinPhone();
   }, [phoneNamed]);
 
   // "Put the radio here", hanging under the phone's ring.
@@ -801,6 +940,13 @@ export default function MapView({ selected, onSelect, onGroup, filter, coverBott
       const step = courseStep(courseFrom.current, phone, course.current);
       courseFrom.current = step.from;
       course.current = step.course;
+      courseNow.current = step.course;
+      // Standing at a light the ring comes back, and goes again once the phone is on its way.
+      if (step.moving !== movingNow.current) {
+        movingNow.current = step.moving;
+        setPhoneMoving(step.moving);
+      }
+      spinPhone();
     }
     const changed = shownMode.current !== mode;
     shownMode.current = mode;

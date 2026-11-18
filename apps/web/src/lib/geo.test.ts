@@ -85,18 +85,21 @@ test("a spot reads as a map copies it, and reads back the same", () => {
 test("the course is taken from fixes far enough apart, and kept while the phone stands or creeps", () => {
   const east = 50 / (111_320 * Math.cos((55 * Math.PI) / 180));
   const start = { lat: 55, lon: 73, at: 0, accuracy: 5 };
-  // The first fix has nothing to measure from.
-  assert.deepEqual(courseStep(null, start, null), { from: start, course: null });
+  // The first fix has nothing to measure from, and nobody knows yet whether the phone goes.
+  assert.deepEqual(courseStep(null, start, null), { from: start, course: null, moving: false });
   // 50 m east in 3 s, 60 km/h.
   const moved = courseStep(start, { lat: 55, lon: 73 + east, at: 3_000, accuracy: 5 }, null);
   assert.ok(Math.abs(moved.course! - 90) < 0.5);
-  // A few metres of wander at a light keep the course, and the place it is measured from.
+  assert.equal(moved.moving, true);
+  // A few metres of wander at a light keep the course, and the place it is measured from; the phone stands.
   const wander = { lat: 55.00003, lon: 73, at: 6_000, accuracy: 5 };
-  assert.deepEqual(courseStep(start, wander, 90), { from: start, course: 90 });
+  assert.deepEqual(courseStep(start, wander, 90), { from: start, course: 90, moving: false });
   // Standing long enough, the next measure starts from where the phone stands.
   assert.equal(courseStep(start, { ...wander, at: 25_000 }, 90).from.at, 25_000);
-  // Creeping 12 m in 10 s turns nothing.
+  // Creeping 12 m in 10 s turns nothing, and is standing.
   assert.equal(courseStep(start, { lat: 55, lon: 73 + (east * 12) / 50, at: 10_000, accuracy: 5 }, 90).course, 90);
+  assert.equal(courseStep(start, { lat: 55, lon: 73 + (east * 12) / 50, at: 10_000, accuracy: 5 }, 90).moving, false);
   // A vague fix must move more than half of how unsure it is.
   assert.equal(courseStep(start, { lat: 55, lon: 73 + (east * 20) / 50, at: 2_000, accuracy: 60 }, 90).course, 90);
+  assert.equal(courseStep(start, { lat: 55, lon: 73 + (east * 20) / 50, at: 2_000, accuracy: 60 }, 90).moving, false);
 });

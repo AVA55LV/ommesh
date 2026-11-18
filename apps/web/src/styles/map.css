@@ -283,6 +283,37 @@
   background: var(--bg);
   box-shadow: 0 0 0 1.5px var(--bg);
 }
+/* On the move the ring gives way to an arrow turned with the course, as a car's navigator has; standing still it
+   comes back, a phone whose fixes wander no longer promising a way the phone is not going. */
+.map-phone.moving .map-phone-ring {
+  display: none;
+}
+.map-phone-arrow {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  display: none;
+  place-items: center;
+  box-sizing: border-box;
+  width: 31px;
+  height: 31px;
+  border: 2.5px solid var(--bg);
+  border-radius: 50%;
+  background: var(--accent);
+  box-shadow: 0 2px 10px rgb(var(--shadow-rgb) / 0.4);
+  transform: translate(-50%, -50%) rotate(var(--course, 0deg));
+}
+.map-phone.moving .map-phone-arrow {
+  display: grid;
+}
+.map-phone-arrow svg {
+  width: 16px;
+  height: 16px;
+  fill: var(--accent-contrast);
+}
+.map-phone.moving .map-name {
+  left: 29px;
+}
 .map-phone .map-name {
   left: 21px;
   top: 0;

@@ -798,6 +798,9 @@ export function MeshMap({ selected, onSelect, onGroup, coverTop, coverBottom, co
   const tool = useMeshTool();
   // A survey's points, coloured by the repeater picked when one is.
   const survey = shownSurvey(tool, surveys);
+  // A survey running draws its tiles even with its card put away: the map is where the tiles are looked at.
+  const runningSurvey = surveys.run ? (surveys.list?.find((s) => s.id === surveys.run!.id) ?? null) : null;
+  const tiles = survey?.points ?? runningSurvey?.points ?? null;
   const only = tool?.kind === "survey" ? tool.only : null;
   const dots = useMemo<MapDot[] | null>(() => (survey ? survey.points.map((p) => ({ lat: p.lat, lon: p.lon, tone: toneFor(p, only), check: p.check === true })) : null), [survey, only]);
   const onDot = tool?.kind === "survey" ? (index: number) => setMeshTool({ ...tool, point: index }) : undefined;
@@ -915,7 +918,7 @@ export function MeshMap({ selected, onSelect, onGroup, coverTop, coverBottom, co
   const top = surveying && (!tool || (tool.kind === "survey" && tool.view === "run")) ? <SurveyBadge /> : null;
   return (
     <Suspense fallback={<div className="empty muted">{t("mesh.map.loading")}</div>}>
-      <MapView selected={selected} onSelect={pick} onGroup={onGroup} filter={test} coverTop={coverTop} coverBottom={coverBottom} coverRight={coverRight} zoomButtons={zoomButtons} overlay={overlay} onLeg={leg} onHold={openSpotMenu} onHandleDrop={drop} onHears={onHears} hearsOn={hearsOpen} onHearsHold={onHearsHold} fit={fit} phone={phone} putHere={putHere} onLocate={onLocate} dots={dots} pickedDot={tool?.kind === "survey" ? tool.point : null} onDot={onDot} follow={follow} recording={surveying} top={top} />
+      <MapView selected={selected} onSelect={pick} onGroup={onGroup} filter={test} coverTop={coverTop} coverBottom={coverBottom} coverRight={coverRight} zoomButtons={zoomButtons} overlay={overlay} onLeg={leg} onHold={openSpotMenu} onHandleDrop={drop} onHears={onHears} hearsOn={hearsOpen} onHearsHold={onHearsHold} fit={fit} phone={phone} putHere={putHere} onLocate={onLocate} dots={dots} tiles={tiles} pickedDot={tool?.kind === "survey" ? tool.point : null} onDot={onDot} follow={follow} recording={surveying} top={top} />
     </Suspense>
   );
 }

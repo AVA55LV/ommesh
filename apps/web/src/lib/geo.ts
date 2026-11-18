@@ -102,15 +102,23 @@ const COURSE_STALE_MS = 20_000;
  * `from`, the fix the last course was taken at, to a new fix once the phone
  * is far enough from it to tell: ten metres at least, and half of how sure
  * the fix is. Standing at a light or creeping along, the course is kept, so a
- * map turned by it does not spin. Hands back where to measure from next.
+ * map turned by it does not spin. Hands back where to measure from next, and
+ * whether the phone is going at all: standing still, its marker is a circle
+ * rather than an arrow, which would otherwise point wherever the last course did.
  */
-export function courseStep(from: { lat: number; lon: number; at: number } | null, fix: { lat: number; lon: number; at: number; accuracy: number }, kept: number | null): { from: { lat: number; lon: number; at: number }; course: number | null } {
-  if (!from) return { from: fix, course: kept };
+export interface CourseStep {
+  from: { lat: number; lon: number; at: number };
+  course: number | null;
+  moving: boolean;
+}
+
+export function courseStep(from: { lat: number; lon: number; at: number } | null, fix: { lat: number; lon: number; at: number; accuracy: number }, kept: number | null): CourseStep {
+  if (!from) return { from: fix, course: kept, moving: false };
   const metres = distanceKm(from.lat, from.lon, fix.lat, fix.lon) * 1000;
   const seconds = (fix.at - from.at) / 1000;
-  if (metres < Math.max(10, fix.accuracy / 2)) return { from: fix.at - from.at > COURSE_STALE_MS ? fix : from, course: kept };
-  if (seconds <= 0 || metres / seconds < COURSE_SPEED) return { from: fix, course: kept };
-  return { from: fix, course: bearingDeg(from.lat, from.lon, fix.lat, fix.lon) };
+  if (metres < Math.max(10, fix.accuracy / 2)) return { from: fix.at - from.at > COURSE_STALE_MS ? fix : from, course: kept, moving: false };
+  if (seconds <= 0 || metres / seconds < COURSE_SPEED) return { from: fix, course: kept, moving: false };
+  return { from: fix, course: bearingDeg(from.lat, from.lon, fix.lat, fix.lon), moving: true };
 }
 
 export type Freshness = "fresh" | "aging" | "stale";
