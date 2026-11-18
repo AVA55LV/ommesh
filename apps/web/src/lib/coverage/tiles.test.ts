@@ -1,60 +1,63 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { CELL_M, CELL_LEVELS, MIN_CELL_PX, M_PER_DEG, cellOf, cellPolygon, levelAt, tilesAt } from "./tiles.js";
+import { CELL_LEVELS, CELL_M, MIN_CELL_PX, M_PER_DEG, cellOf, cellPolygon, hexSide, levelAt, tilesAt } from "./tiles.js";
 import { metresPerPixel } from "../geo.js";
 import type { SurveyPoint } from "../surveyData.js";
 
 const reply = (key: string, us: number, them: number) => ({ key, us, them, rssi: -90 });
 const point = (lat: number, lon: number, replies = [reply("aa", 2, 3)]): SurveyPoint => ({ at: 0, lat, lon, accuracy: 5, replies });
 
-test("a tile is a square of 200 m, its centre half a step from the grid's lines", () => {
+/** Metres between two places near the first one, the long way round the cosine. */
+const away = (lat: number, lon: number, atLat: number, atLon: number) =>
+  Math.hypot((atLat - lat) * M_PER_DEG, (atLon - lon) * M_PER_DEG * Math.cos((lat * Math.PI) / 180));
+
+test("a cell's middle is its own, and a place is never further from it than a hexagon's side", () => {
+  for (const [lat, lon] of [
+    [55.03, 73.37],
+    [57.15, 65.53],
+    [-33.87, 18.42],
+    [60.17, -100.5],
+  ] as [number, number][]) {
+    const cell = cellOf(lat, lon);
+    const again = cellOf(cell.lat, cell.lon);
+    assert.deepEqual([again.r, again.c], [cell.r, cell.c], `${lat}, ${lon}`);
+    assert.ok(away(lat, lon, cell.lat, cell.lon) <= hexSide(CELL_M) + 1, `${lat}, ${lon}: ${away(lat, lon, cell.lat, cell.lon).toFixed(1)} m`);
+  }
+});
+
+test("a hexagon is as tall as a cell and a cell and a fifth wide across its corners", () => {
   const cell = cellOf(55, 73);
-  const latStep = CELL_M / M_PER_DEG;
-  assert.ok(Math.abs(cell.lat / latStep - 0.5 - Math.floor(cell.lat / latStep)) < 1e-9, "half a step down its row");
-  const lonStep = CELL_M / (M_PER_DEG * Math.cos((cell.lat * Math.PI) / 180));
-  assert.ok(Math.abs(cell.lon / lonStep - 0.5 - Math.floor(cell.lon / lonStep)) < 1e-9, "half a step along it");
-  assert.ok(Math.abs(cell.lonStep - lonStep) < 1e-12);
+  const ring = cellPolygon(cell.lat, cell.lon);
+  const lats = ring.map((p) => p[1]);
+  const lons = ring.map((p) => p[0]);
+  const height = (Math.max(...lats) - Math.min(...lats)) * M_PER_DEG;
+  const width = (Math.max(...lons) - Math.min(...lons)) * M_PER_DEG * Math.cos((cell.lat * Math.PI) / 180);
+  assert.ok(Math.abs(height - CELL_M) < 1, `height ${height}`);
+  assert.ok(Math.abs(width - (2 * CELL_M) / Math.sqrt(3)) < 1, `width ${width}`);
+  assert.deepEqual(ring[0], ring[ring.length - 1], "the ring closes");
 });
 
-test("a point falls in the tile its centre belongs to, and neighbours share an edge", () => {
-  const a = cellOf(55, 73);
-  // 0,0001° of latitude is 11 m: the same tile.
-  assert.equal(cellOf(55.0001, 73).key, a.key);
-  // About 250 m north: the next row.
-  assert.notEqual(cellOf(55.0025, 73).key, a.key);
-  const north = cellOf(55.0025, 73);
-  const aBox = cellPolygon(a);
-  const nBox = cellPolygon(north);
-  assert.ok(Math.abs(aBox[2]![1] - nBox[0]![1]) < 1e-9, "the top of one tile is the bottom of the next");
-
-  const east = cellOf(55, 73 + a.lonStep);
-  assert.notEqual(east.key, a.key);
-  const eBox = cellPolygon(east);
-  assert.ok(Math.abs(aBox[1]![0] - eBox[0]![0]) < 1e-9, "the right edge of one tile is the left of the next");
+test("a place and its neighbour 250 m off are in different cells, and 40 m off in the same", () => {
+  const here = cellOf(55, 73);
+  const near = cellOf(55.0003, 73.0002);
+  assert.equal(near.key, here.key);
+  const east = cellOf(55, 73 + 250 / (M_PER_DEG * Math.cos((55 * Math.PI) / 180)));
+  assert.notEqual(east.key, here.key);
+  // The middle of the cell next door is a column and a half of sides away, not a hair.
+  assert.ok(away(here.lat, here.lon, east.lat, east.lon) > 150);
 });
 
-test("a tile is 200 m by 200 m in metres, not in degrees", () => {
-  const cell = cellOf(55, 73);
-  const box = cellPolygon(cell);
-  const height = (box[2]![1] - box[1]![1]) * M_PER_DEG;
-  const width = (box[1]![0] - box[0]![0]) * M_PER_DEG * Math.cos((cell.lat * Math.PI) / 180);
-  assert.ok(Math.abs(height - CELL_M) < 0.01, `height ${height}`);
-  assert.ok(Math.abs(width - CELL_M) < 0.01, `width ${width}`);
-});
-
-test("a tile takes the best answer in it, and is grey only where nobody answered", () => {
+test("a cell takes the best answer in it, and is grey only where nobody answered", () => {
   const good = point(55, 73, [reply("aa", 4, 5)]);
-  const weak = point(55.0002, 73, [reply("aa", -9, -8)]);
+  const weak = point(55.0002, 73.0002, [reply("aa", -9, -8)]);
   const none = point(55, 73, []);
-  const near = point(55.0001, 73.0001, []);
-
   assert.deepEqual(tilesAt([good, weak]).map((t) => t.tone), ["good"]);
   assert.deepEqual(tilesAt([none]).map((t) => t.tone), ["none"]);
-  assert.deepEqual(tilesAt([none, weak]).map((t) => t.tone), ["weak"], "one answer lifts the tile off grey");
-  assert.equal(tilesAt([near, none]).length, 1, "two asks in one tile are one tile");
+  assert.deepEqual(tilesAt([none, weak]).map((t) => t.tone), ["weak"], "one answer lifts the cell off grey");
+  assert.equal(tilesAt([none, point(55.0001, 73.0001, [])]).length, 1, "two asks in one cell are one cell");
 });
 
-test("the map draws the finest grid whose tile is not a smear", () => {
+test("the map draws the finest grid whose cell is not a smear", () => {
   // 200 m at zoom 13 is 36 px; at zoom 12 it is 18 px, so the 400 m grid takes over.
   assert.equal(levelAt(13, 55), 200);
   assert.equal(levelAt(12, 55), 400);

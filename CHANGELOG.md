@@ -14,7 +14,7 @@
 - In the desktop app, with the row of recent chats up (Ctrl+Tab), the left and right arrows move along it too, as Tab and Shift+Tab do.
 
 ### Mesh and the map
-- A coverage survey now draws its tiles on the map: squares of 200 m, as the coverage map at nw.ommesh.ru draws them, green, amber or red by the best answer in each and grey where nobody answered, with the tile the phone stands in ringed. Drawn further out they give way to coarser ones instead of turning into a smear, and the phone's marker is an arrow turned with its course while moving and a circle when standing.
+- A coverage survey now draws its tiles on the map: the honeycomb cells of 200 m the coverage map at nw.ommesh.ru draws, green, amber or red by the best answer in each and grey where nobody answered, with the tile the phone stands in ringed. Drawn further out they give way to coarser ones instead of turning into a smear, and the phone's marker is an arrow turned with its course while moving and a circle when standing.
 - Now, at the top of the battery's sheet (tap the battery tile), is the radio's last reading as it took it, no longer the mean of the last half hour, so a board's `adc.multiplier` can be tuned against a meter. When the two differ, the mean the charge is counted from is written under it.
 - The box that asks before a survey goes to a coverage map fits a narrow phone again: its words wrap, and the send button, whose name is the map's address, takes a second line instead of dragging the sheet sideways and carrying the cross of its head out of reach.
 - Ommesh's own coverage map now lives at nw.ommesh.ru: the sheet that sends a survey says the new address and sends it there.

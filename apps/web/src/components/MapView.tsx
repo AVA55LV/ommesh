@@ -89,7 +89,7 @@ function cellsGeoJson(points: readonly SurveyPoint[], size: number) {
     type: "FeatureCollection" as const,
     features: tilesAt(points, size).map((tile) => ({
       type: "Feature" as const,
-      geometry: { type: "Polygon" as const, coordinates: [cellPolygon(tile, size)] },
+      geometry: { type: "Polygon" as const, coordinates: [cellPolygon(tile.lat, tile.lon, size)] },
       properties: { color: colours[tile.tone], opacity: toneFill(tile.tone, dark), line: tile.tone === "none" ? 0.4 : 0.65 },
     })),
   };
@@ -100,7 +100,7 @@ function cellGeoJson(lat: number, lon: number, size: number) {
   const cell = cellOf(lat, lon, size);
   return {
     type: "FeatureCollection" as const,
-    features: [{ type: "Feature" as const, geometry: { type: "Polygon" as const, coordinates: [cellPolygon(cell, size)] }, properties: {} }],
+    features: [{ type: "Feature" as const, geometry: { type: "Polygon" as const, coordinates: [cellPolygon(cell.lat, cell.lon, size)] }, properties: {} }],
   };
 }
 
