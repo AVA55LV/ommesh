@@ -577,12 +577,15 @@ export default function MapView({ selected, onSelect, onGroup, filter, coverBott
     // zoom calls for, coloured by the best answer in each, and the one tile the phone stands in.
     const paintSurveyNow = () => {
       const size = levelAt(m.getZoom(), m.getCenter().lat);
+      // With no survey on the map there are no tiles, and no tile of the phone's either: a map being
+      // followed outside a survey has nothing of a survey to show.
+      const points = surveyPoints.current;
       const cells = m.getSource("survey-cells") as GeoJSONSource | undefined;
-      if (cells) cells.setData(surveyPoints.current ? cellsGeoJson(surveyPoints.current, size) : NO_FEATURES);
+      if (cells) cells.setData(points ? cellsGeoJson(points, size) : NO_FEATURES);
       const now = m.getSource("survey-now") as GeoJSONSource | undefined;
       if (now) {
         const at = surveyPhone.current;
-        now.setData(at ? cellGeoJson(at.lat, at.lon, size) : NO_FEATURES);
+        now.setData(points && at ? cellGeoJson(at.lat, at.lon, size) : NO_FEATURES);
       }
       if (m.getLayer("survey-now-line")) {
         m.setPaintProperty("survey-now-casing", "line-color", cssColour("--bg"));
