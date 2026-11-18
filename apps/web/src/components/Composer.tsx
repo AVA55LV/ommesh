@@ -27,7 +27,7 @@ import { session, useSession } from "../lib/session.js";
 import { FORMAT_CHOICES, formatAround, formatKey, formatRuns, keysOf, plainText, toggleFormat, type FormatChoice, type FormatKind } from "../lib/textFormat.js";
 import { noteFormatSelection, offerFormatMenu } from "../lib/formatMenu.js";
 import { toast } from "../lib/toast.js";
-import { AttachError, MAX_FILE_BYTES, MAX_PHOTO_BYTES, attachmentsReady, compressPhoto, getAttachments, keyFor, linkFor, pickFile, presignPut, putBytes, sizeText } from "../lib/attachments.js";
+import { AttachError, MAX_FILE_BYTES, MAX_PHOTO_BYTES, attachmentsReady, clipboardFiles, compressPhoto, getAttachments, keyFor, kindOf, linkFor, nameOfPaste, pickFile, presignPut, putBytes, sizeText } from "../lib/attachments.js";
 import { openRadioPage } from "../lib/nav.js";
 import { longestLink, shortenLink, ShortRefused, withShortLink } from "../lib/shortLink.js";
 import { usePreviewMode } from "../lib/linkPreview.js";
@@ -179,6 +179,9 @@ export function Composer({ conversation, title, reply, onReplyDone, onSent }: { 
   const [staged, setStaged] = useState<Staged | null>(null);
   const [holdingAttach, setHoldingAttach] = useState(false);
   const attachAbort = useRef<AbortController | null>(null);
+  // Which paste or choice owns the uploads: another one, or «Убрать», leaves the rest of a
+  // queue of pasted files unstarted rather than showing them over the reader's choice.
+  const attachRun = useRef(0);
   // The chat an upload was started in: the link must not land in the next one opened while it goes.
   const attachChat = useRef(conversation);
   useEffect(() => {
@@ -193,6 +196,7 @@ export function Composer({ conversation, title, reply, onReplyDone, onSent }: { 
   };
 
   const dropStaged = () => {
+    attachRun.current++;
     attachAbort.current?.abort();
     attachAbort.current = null;
     setStaged((s) => {
@@ -201,24 +205,25 @@ export function Composer({ conversation, title, reply, onReplyDone, onSent }: { 
     });
   };
 
-  const upload = async (kind: "photo" | "file", file: File) => {
+  /** One file on its way to the bucket; false when it did not get there, so its bar still says why. */
+  const upload = async (kind: "photo" | "file", file: File): Promise<boolean> => {
     const id = `${Date.now()}-${Math.random().toString(36).slice(2)}`;
     const forChat = conversation;
     attachAbort.current?.abort();
     const controller = new AbortController();
     attachAbort.current = controller;
     let blob: Blob = file;
-    let name = file.name;
+    let name = nameOfPaste(file);
     let preview: string | null = null;
     if (kind === "photo") {
       try {
         const squeezed = await compressPhoto(file);
         blob = squeezed.blob;
-        name = squeezed.name;
+        name = squeezed.name || name;
         preview = URL.createObjectURL(blob);
       } catch {
-        setStaged({ id, kind, name: file.name, size: file.size, preview: null, phase: "error", progress: 0, code: "photo", status: 0, file });
-        return;
+        setStaged({ id, kind, name, size: file.size, preview: null, phase: "error", progress: 0, code: "photo", status: 0, file });
+        return false;
       }
     }
     setStaged({ id, kind, name, size: blob.size, preview, phase: "uploading", progress: 0, code: null, status: 0, file });
@@ -227,32 +232,55 @@ export function Composer({ conversation, title, reply, onReplyDone, onSent }: { 
       const key = keyFor(kind, name, blob.type || file.type);
       const url = await presignPut(settings, key);
       await putBytes(url, blob, name, (share) => setStaged((s) => (s && s.id === id ? { ...s, progress: share } : s)), controller.signal);
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) return false;
       if (attachAbort.current === controller) attachAbort.current = null;
       setStaged((s) => (s && s.id === id ? null : s));
       // Пока шла загрузка, могли открыть другой чат: ссылка остаётся в том, где её начали.
-      if (attachChat.current !== forChat) return;
+      if (attachChat.current !== forChat) return true;
       insertLink(linkFor(key, settings));
+      return true;
     } catch (error) {
-      if (controller.signal.aborted) return;
+      if (controller.signal.aborted) return false;
       const code = error instanceof AttachError ? error.code : "network";
       const status = error instanceof AttachError ? error.status : 0;
       setStaged((s) => (s && s.id === id ? { ...s, phase: "error", code, status } : s));
+      return false;
     }
+  };
+
+  /** A file over what the bucket takes is said so and stays here; true for one that goes. */
+  const takes = (kind: "photo" | "file", file: File): boolean => {
+    if (kind === "file" && file.size > MAX_FILE_BYTES) {
+      toast(t("chats.attach.tooBig", { name: nameOfPaste(file), size: sizeText(file.size), max: sizeText(MAX_FILE_BYTES) }), "error");
+      return false;
+    }
+    if (kind === "photo" && file.size > MAX_PHOTO_BYTES) {
+      toast(t("chats.attach.photoTooBig", { size: sizeText(file.size), max: sizeText(MAX_PHOTO_BYTES) }), "error");
+      return false;
+    }
+    return true;
   };
 
   const choose = async (kind: "photo" | "file") => {
     const file = await pickFile(kind === "photo" ? "image/*" : "");
     if (!file) return;
-    if (kind === "file" && file.size > MAX_FILE_BYTES) {
-      toast(t("chats.attach.tooBig", { name: file.name, size: sizeText(file.size), max: sizeText(MAX_FILE_BYTES) }), "error");
-      return;
+    attachRun.current++;
+    if (takes(kind, file)) void upload(kind, file);
+  };
+
+  /**
+   * Photos and files pasted with the keys: a screenshot, or files copied in the
+   * file manager, take the picker's own way, one after another, each with a link
+   * of its own. A file that fails stops the queue with its bar and its retry.
+   */
+  const pasteFiles = async (files: File[]) => {
+    const run = ++attachRun.current;
+    for (const file of files) {
+      if (run !== attachRun.current) return;
+      const kind = kindOf(file);
+      if (!takes(kind, file)) continue;
+      if (!(await upload(kind, file))) return;
     }
-    if (kind === "photo" && file.size > MAX_PHOTO_BYTES) {
-      toast(t("chats.attach.photoTooBig", { size: sizeText(file.size), max: sizeText(MAX_PHOTO_BYTES) }), "error");
-      return;
-    }
-    void upload(kind, file);
   };
 
   const askForBucket = () => {
@@ -278,7 +306,8 @@ export function Composer({ conversation, title, reply, onReplyDone, onSent }: { 
   const attachTap = (e: MouseEvent) => {
     if (e.detail > 0) {
       if (!attachmentsReady()) return askForBucket();
-      toast(t("chats.attach.hold"));
+      // The keys are a second way to attach, and a click is where the reader learns of it.
+      toast(t("chats.attach.hold"), "", undefined, touch ? undefined : t("chats.attach.pasteHint", { keys: MAC ? "⌘V" : "Ctrl+V" }));
       return;
     }
     // С клавиатуры держать нечего: сразу выбор фото.
@@ -759,6 +788,17 @@ export function Composer({ conversation, title, reply, onReplyDone, onSent }: { 
               enterKeyHint={touch ? "enter" : "send"}
               autoCapitalize="sentences"
               onChange={(e) => setText(e.target.value)}
+              onPaste={(e) => {
+                const files = clipboardFiles(e.clipboardData);
+                if (files.length === 0) return;
+                // A photo or a file pasted is an attachment, not words for the field.
+                e.preventDefault();
+                if (!attachmentsReady()) {
+                  askForBucket();
+                  return;
+                }
+                void pasteFiles(files);
+              }}
               onSelect={(e) => {
                 watchCaret();
                 noteFormatSelection(e.currentTarget.selectionStart !== e.currentTarget.selectionEnd);

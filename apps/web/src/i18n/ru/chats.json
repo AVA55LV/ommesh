@@ -315,6 +315,7 @@
   "composer.fits": "влезает",
   "attach.button": "Прикрепить фото или файл",
   "attach.hold": "Удерживайте, чтобы приложить",
+  "attach.pasteHint": "Или вставьте фото или файл из буфера обмена: {keys}",
   "attach.menuTitle": "Прикрепить",
   "attach.photo": "Фото",
   "attach.photoHint": "Сжать и отправить ссылку",

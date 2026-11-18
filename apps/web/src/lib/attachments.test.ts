@@ -1,7 +1,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { t } from "../i18n/index.js";
-import { ATTACH_DEFAULTS, attachmentsReady, autoPathStyle, keyFor, linkFor, presignPut, publicBase, sizeText, type AttachmentsSettings } from "./attachments.js";
+import { ATTACH_DEFAULTS, attachmentsReady, autoPathStyle, clipboardFiles, keyFor, kindOf, linkFor, nameOfPaste, presignPut, publicBase, sizeText, type AttachmentsSettings } from "./attachments.js";
 
 const SETTINGS: AttachmentsSettings = {
   ...ATTACH_DEFAULTS,
@@ -76,6 +76,34 @@ test("a bucket behind a proxy on the web's own port is put in the path only when
   // A port or a bare address cannot be a subdomain: those are a path whatever the switch says.
   assert.equal(autoPathStyle({ ...SETTINGS, endpoint: "http://localhost:9000" }), true);
   assert.equal(autoPathStyle(behind), false);
+});
+
+test("a pasted picture goes the photo's way and anything else as a file", () => {
+  assert.equal(kindOf({ type: "image/png" }), "photo");
+  assert.equal(kindOf({ type: "IMAGE/JPEG" }), "photo");
+  assert.equal(kindOf({ type: "application/pdf" }), "file");
+  // A file copied in the file manager may have no type at all.
+  assert.equal(kindOf({ type: "" }), "file");
+});
+
+test("a file the clipboard gave without a name still has one", () => {
+  assert.equal(nameOfPaste(new File(["x"], "тропа.jpg", { type: "image/jpeg" })), "тропа.jpg");
+  assert.equal(nameOfPaste(new File(["x"], "", { type: "image/png" })), "clipboard.png");
+  assert.equal(nameOfPaste(new File(["x"], "", { type: "" })), "clipboard.bin");
+});
+
+test("a clipboard is read as files, in the order they were copied, and text is none", () => {
+  const photo = new File(["png"], "image.png", { type: "image/png" });
+  const doc = new File(["pdf"], "договор.pdf", { type: "application/pdf" });
+  // A screenshot comes as an item of kind file, whatever else the clipboard holds.
+  assert.deepEqual(clipboardFiles({ items: [{ kind: "file", getAsFile: () => photo }, { kind: "string", getAsFile: () => null }], files: [] }), [photo]);
+  // A file copied in the file manager may be listed among the items too; the items are the order.
+  assert.deepEqual(clipboardFiles({ items: [{ kind: "file", getAsFile: () => doc }, { kind: "file", getAsFile: () => photo }] }), [doc, photo]);
+  // A browser that fills only the plain list still gives its files.
+  assert.deepEqual(clipboardFiles({ items: [], files: [photo, doc] }), [photo, doc]);
+  // Copied words are words, not an attachment; so is an empty clipboard.
+  assert.deepEqual(clipboardFiles({ items: [{ kind: "string", getAsFile: () => null }], files: [] }), []);
+  assert.deepEqual(clipboardFiles({}), []);
 });
 
 test("a size follows the app's language and the reader's decimal mark", () => {

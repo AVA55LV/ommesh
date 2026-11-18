@@ -114,6 +114,24 @@ function shortId(): string {
 
 const EXTENSION = /\.([a-z0-9]{1,8})$/i;
 
+/** A photo goes the photo's way wherever it came from; anything else goes as a file. */
+export function kindOf(file: { type: string }): "photo" | "file" {
+  return file.type.toLowerCase().startsWith("image/") ? "photo" : "file";
+}
+
+/**
+ * What to call what the clipboard gave without a name: a screenshot often comes
+ * as `image.png`, but a browser may leave the name empty, and both the attach
+ * bar and the upload say a name.
+ */
+export function nameOfPaste(file: File): string {
+  if (file.name.trim() !== "") {
+    return file.name;
+  }
+  const type = file.type.split("/")[1]?.replace(/[^a-z0-9]/gi, "").toLowerCase() ?? "";
+  return `clipboard.${type || "bin"}`;
+}
+
 /** A photo keeps its kind of file; a file keeps its extension, which the card shows as a badge. */
 export function keyFor(kind: "photo" | "file", name: string, type = ""): string {
   const fromName = EXTENSION.exec(name)?.[1]?.toLowerCase() ?? "";
@@ -306,6 +324,37 @@ export function sizeText(bytes: number): string {
   // The reader's decimal mark and the app's own units, as a file card says a size.
   const number = (n: number) => n.toLocaleString(locale(), { maximumFractionDigits: 1 });
   return bytes >= 1024 * 1024 ? t("chats.preview.mb", { size: number(bytes / 1024 / 1024) }) : t("chats.preview.kb", { size: number(Math.max(1, bytes / 1024)) });
+}
+
+/** What a paste event's clipboard has to hand: the browser's own lists of what was copied. */
+export interface ClipboardFiles {
+  files?: ArrayLike<File> | null;
+  items?: ArrayLike<{ kind: string; getAsFile(): File | null }> | null;
+}
+
+/**
+ * The files a clipboard carries, in the order they were copied. A screenshot
+ * comes as an item of kind `file`, and a file copied in the file manager is
+ * listed among the items too; the plain list is the way in for a browser that
+ * fills only that one.
+ */
+export function clipboardFiles(clip: ClipboardFiles): File[] {
+  const fromItems: File[] = [];
+  if (clip.items) {
+    for (const item of Array.from(clip.items)) {
+      if (item.kind !== "file") {
+        continue;
+      }
+      const file = item.getAsFile();
+      if (file) {
+        fromItems.push(file);
+      }
+    }
+  }
+  if (fromItems.length > 0) {
+    return fromItems;
+  }
+  return clip.files ? Array.from(clip.files) : [];
 }
 
 /** Asks the disk, or the camera, for one file; null when the picker was put away. */

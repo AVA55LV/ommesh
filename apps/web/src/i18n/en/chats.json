@@ -279,6 +279,7 @@
   "composer.fits": "fits",
   "attach.button": "Attach a photo or a file",
   "attach.hold": "Hold to attach",
+  "attach.pasteHint": "Or paste a photo or a file from the clipboard: {keys}",
   "attach.menuTitle": "Attach",
   "attach.photo": "Photo",
   "attach.photoHint": "Squeeze it and send a link",
