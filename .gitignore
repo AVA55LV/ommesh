@@ -35,3 +35,8 @@ apps/mobile/ios/MeshcoreCore/build/
 .playwright-mcp/
 .DS_Store
 Thumbs.db
+
+# Local notes, worktrees and the scratch of a task: not the app's.
+.claude/worktrees/
+.dsh/
+.tmp/
