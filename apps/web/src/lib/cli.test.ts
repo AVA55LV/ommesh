@@ -1,8 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { COMMANDS, RADIO_COMMANDS, suggest } from "./cli.js";
+import { readFileSync } from "node:fs";
+import { CLI_GROUPS, CLI_GROUP_TITLE, COMMANDS, RADIO_COMMANDS, suggest } from "./cli.js";
 
 const labels = (draft: string) => suggest(draft).chips.map((c) => c.label);
+
+/** The words of the reference, as the app ships them. */
+const words = (code: string) => JSON.parse(readFileSync(new URL(`../i18n/${code}/cli.json`, import.meta.url), "utf8")) as Record<string, string>;
 
 test("part of a command anywhere in it finds it: duty finds both dutycycles", () => {
   assert.deepEqual(labels("duty"), ["get dutycycle", "set dutycycle"]);
@@ -16,8 +20,8 @@ test("commands that start with what is typed come before those that only contain
 });
 
 test("a command that takes a value says what the value is, and offers the values it takes", () => {
-  assert.deepEqual(suggest("set dutycycle "), { chips: [], hint: "1–100, % of airtime it may use" });
-  assert.deepEqual(suggest("set dutycycle 5"), { chips: [], hint: "1–100, % of airtime it may use" });
+  assert.equal(suggest("set dutycycle ").hint, "1–100, % of airtime it may use");
+  assert.equal(suggest("set dutycycle 5").hint, "1–100, % of airtime it may use");
   assert.deepEqual(suggest("set repeat ").chips, [
     { label: "on", fill: "set repeat on" },
     { label: "off", fill: "set repeat off" },
@@ -50,4 +54,46 @@ test("the radio's own console offers the companion's commands, not a repeater's"
   assert.ok(!radio("nei").length, "no neighbours on a companion");
   assert.equal(suggest("set tz.offset ", "radio").hint, "hours from UTC, −12 to 14");
   assert.equal(new Set(RADIO_COMMANDS.map((c) => c.text)).size, RADIO_COMMANDS.length);
+});
+
+test("a suggestion says what the command does, and how many there are", () => {
+  const adc = suggest("adc");
+  assert.deepEqual(adc.chips.map((c) => c.label), ["get adc.multiplier", "set adc.multiplier"]);
+  assert.ok(adc.chips.every((c) => c.about), "both say what they do");
+  assert.equal(adc.total, 2);
+  // A value says nothing about itself: it is not a command.
+  assert.ok(suggest("set repeat ").chips.every((c) => !c.about));
+  // More than the chips show: the field lists a few, the reference has the rest.
+  const many = suggest("set");
+  assert.equal(many.chips.length, 12);
+  assert.ok(many.total > many.chips.length);
+});
+
+test("every command has words in both languages", () => {
+  const en = words("en");
+  const ru = words("ru");
+  const missing: string[] = [];
+  for (const command of [...COMMANDS, ...RADIO_COMMANDS]) {
+    const key = command.about.replace(/^cli\./, "");
+    if (!en[key]) missing.push(`en ${key}`);
+    if (!ru[key]) missing.push(`ru ${key}`);
+  }
+  assert.deepEqual(missing, [], "a command with no words reads as its key");
+});
+
+test("no words are left over for a command that no longer exists", () => {
+  const used = new Set([...COMMANDS, ...RADIO_COMMANDS].map((command) => command.about.replace(/^cli\./, "")));
+  const dead = Object.keys(words("en")).filter((key) => key.startsWith("about.") && !used.has(key));
+  assert.deepEqual(dead, [], "the reference would never show these");
+});
+
+test("every command is in a group the reference knows, and each group is named in both languages", () => {
+  const en = words("en");
+  const ru = words("ru");
+  for (const command of [...COMMANDS, ...RADIO_COMMANDS]) {
+    assert.ok(CLI_GROUPS.includes(command.group), `${command.text.trim()} is in no group`);
+    const key = CLI_GROUP_TITLE[command.group].replace(/^cli\./, "");
+    assert.ok(en[key], `en ${key}`);
+    assert.ok(ru[key], `ru ${key}`);
+  }
 });

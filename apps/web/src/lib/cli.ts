@@ -1,14 +1,36 @@
 /**
  * The commands a repeater, room or sensor answers over the air, for the
- * console's suggestions: MeshCore's `CommonCLI.cpp` and `simple_repeater`,
- * and the MeshCoreTel fork's Wi-Fi, MQTT and web panel. Left out are the
- * ones the firmware takes only from its serial port (`erase`, `log`,
- * `stats-*`, `set freq`, `get prv.key`, `get acl`): over the air they answer
- * "Unknown command". The connected radio's own console has a list of its own,
- * `RADIO_COMMANDS`.
+ * console's suggestions and its reference: MeshCore's `CommonCLI.cpp` and
+ * `simple_repeater`, and the MeshCoreTel fork's Wi-Fi, MQTT and web panel.
+ * Left out are the ones the firmware takes only from its serial port (`erase`,
+ * `log`, `stats-*`, `set freq`, `get prv.key`, `get acl`): over the air they
+ * answer "Unknown command". The connected radio's own console has a list of its
+ * own, `RADIO_COMMANDS`.
+ *
+ * Every command says what it does (`about`, the words in i18n/cli.json) and
+ * which part of the reference it belongs to, so the reader can find it without
+ * knowing its name.
  */
 
 import { t, type Key } from "../i18n/index.js";
+
+/** The parts of the reference, in the order it shows them. */
+export type CliGroup = "node" | "advert" | "where" | "radio" | "repeat" | "access" | "power" | "net" | "sensors";
+
+export const CLI_GROUPS: CliGroup[] = ["node", "advert", "where", "radio", "repeat", "access", "power", "net", "sensors"];
+
+/** What a group is called: the heading over its commands. */
+export const CLI_GROUP_TITLE: Record<CliGroup, Key> = {
+  node: "cli.group.node",
+  advert: "cli.group.advert",
+  where: "cli.group.where",
+  radio: "cli.group.radio",
+  repeat: "cli.group.repeat",
+  access: "cli.group.access",
+  power: "cli.group.power",
+  net: "cli.group.net",
+  sensors: "cli.group.sensors",
+};
 
 export interface CliCommand {
   /** What is typed; it ends in a space when a value follows. */
@@ -17,152 +39,171 @@ export interface CliCommand {
   arg?: Key;
   /** The values it takes, offered once the command is typed. */
   values?: string[];
+  /** What it does, in the reference and beside what is typed. */
+  about: Key;
+  /** Where the reference puts it. */
+  group: CliGroup;
 }
 
 const ONOFF = ["on", "off"];
 
-/** Settings read with `get` and written with `set`: the key, then what a value is. `get: false` for write-only, `set: false` for read-only. */
+/**
+ * A setting read with `get` and written with `set`: the key, and the words of
+ * each direction. A setting that is only read has no `write`; a secret that is
+ * only written has no `read`.
+ */
 interface Setting {
   key: string;
+  group: CliGroup;
+  read?: Key;
+  write?: Key;
   arg?: Key;
   values?: string[];
-  get?: boolean;
-  set?: boolean;
 }
 
 const SETTINGS: Setting[] = [
   // Radio and airtime.
-  { key: "radio", arg: "node.cli.radio" },
-  { key: "freq", set: false },
-  { key: "tx", arg: "node.cli.dbm" },
-  { key: "dutycycle", arg: "node.cli.dutycycle" },
-  { key: "af", arg: "node.cli.af" },
-  { key: "radio.rxgain", values: ONOFF },
-  { key: "int.thresh", arg: "node.cli.intThresh" },
-  { key: "agc.reset.interval", arg: "node.cli.agcReset" },
+  { key: "radio", group: "radio", read: "cli.about.radio", write: "cli.about.radio.set", arg: "node.cli.radio" },
+  { key: "freq", group: "radio", read: "cli.about.freq" },
+  { key: "tx", group: "radio", read: "cli.about.tx", write: "cli.about.tx.set", arg: "node.cli.dbm" },
+  { key: "dutycycle", group: "radio", read: "cli.about.dutycycle", write: "cli.about.dutycycle.set", arg: "node.cli.dutycycle" },
+  { key: "af", group: "radio", read: "cli.about.af", write: "cli.about.af.set", arg: "node.cli.af" },
+  { key: "radio.rxgain", group: "radio", read: "cli.about.radio.rxgain", write: "cli.about.radio.rxgain.set", values: ONOFF },
+  { key: "int.thresh", group: "radio", read: "cli.about.int.thresh", write: "cli.about.int.thresh.set", arg: "node.cli.intThresh" },
+  { key: "agc.reset.interval", group: "radio", read: "cli.about.agc.reset.interval", write: "cli.about.agc.reset.interval.set", arg: "node.cli.agcReset" },
+  { key: "cad", group: "radio", read: "cli.about.cad", write: "cli.about.cad.set", values: ONOFF },
+  { key: "extra.sf", group: "radio", read: "cli.about.extra.sf", write: "cli.about.extra.sf.set", arg: "node.cli.extraSf" },
+  { key: "radio.fem.rxgain", group: "radio", read: "cli.about.radio.fem.rxgain", write: "cli.about.radio.fem.rxgain.set", values: ONOFF },
+  { key: "radio.fem.txgain", group: "radio", read: "cli.about.radio.fem.txgain", write: "cli.about.radio.fem.txgain.set", values: ONOFF },
+  { key: "path.hash.mode", group: "radio", read: "cli.about.path.hash.mode", write: "cli.about.path.hash.mode.set", values: ["0", "1", "2"], arg: "node.cli.pathHash" },
   // Repeating.
-  { key: "repeat", values: ONOFF },
-  { key: "flood.max", arg: "node.cli.hops" },
-  { key: "flood.max.advert", arg: "node.cli.hops" },
-  { key: "flood.max.unscoped", arg: "node.cli.hops" },
-  { key: "loop.detect", values: ["off", "minimal", "moderate", "strict"] },
-  { key: "path.hash.mode", values: ["0", "1", "2"], arg: "node.cli.pathHash" },
-  { key: "txdelay", arg: "node.cli.txdelay" },
-  { key: "direct.txdelay", arg: "node.cli.txdelay" },
-  { key: "rxdelay", arg: "node.cli.rxdelay" },
-  { key: "multi.acks", values: ["0", "1"] },
+  { key: "repeat", group: "repeat", read: "cli.about.repeat", write: "cli.about.repeat.set", values: ONOFF },
+  { key: "flood.max", group: "repeat", read: "cli.about.flood.max", write: "cli.about.flood.max.set", arg: "node.cli.hops" },
+  { key: "flood.max.advert", group: "repeat", read: "cli.about.flood.max.advert", write: "cli.about.flood.max.advert.set", arg: "node.cli.hops" },
+  { key: "flood.max.unscoped", group: "repeat", read: "cli.about.flood.max.unscoped", write: "cli.about.flood.max.unscoped.set", arg: "node.cli.hops" },
+  { key: "loop.detect", group: "repeat", read: "cli.about.loop.detect", write: "cli.about.loop.detect.set", values: ["off", "minimal", "moderate", "strict"] },
+  { key: "txdelay", group: "repeat", read: "cli.about.txdelay", write: "cli.about.txdelay.set", arg: "node.cli.txdelay" },
+  { key: "direct.txdelay", group: "repeat", read: "cli.about.direct.txdelay", write: "cli.about.direct.txdelay.set", arg: "node.cli.txdelay" },
+  { key: "rxdelay", group: "repeat", read: "cli.about.rxdelay", write: "cli.about.rxdelay.set", arg: "node.cli.rxdelay" },
+  { key: "multi.acks", group: "repeat", read: "cli.about.multi.acks", write: "cli.about.multi.acks.set", values: ["0", "1"] },
   // Adverts and identity.
-  { key: "advert.interval", arg: "node.cli.advertInterval" },
-  { key: "flood.advert.interval", arg: "node.cli.floodAdvertInterval" },
-  { key: "name", arg: "node.cli.name" },
-  { key: "lat", arg: "node.cli.degrees" },
-  { key: "lon", arg: "node.cli.degrees" },
-  { key: "owner.info", arg: "node.cli.ownerInfo" },
-  { key: "public.key", set: false },
-  { key: "role", set: false },
-  { key: "prv.key", get: false, arg: "node.cli.privateKey" },
+  { key: "advert.interval", group: "where", read: "cli.about.advert.interval", write: "cli.about.advert.interval.set", arg: "node.cli.advertInterval" },
+  { key: "flood.advert.interval", group: "where", read: "cli.about.flood.advert.interval", write: "cli.about.flood.advert.interval.set", arg: "node.cli.floodAdvertInterval" },
+  { key: "name", group: "where", read: "cli.about.name", write: "cli.about.name.set", arg: "node.cli.name" },
+  { key: "lat", group: "where", read: "cli.about.lat", write: "cli.about.lat.set", arg: "node.cli.degrees" },
+  { key: "lon", group: "where", read: "cli.about.lon", write: "cli.about.lon.set", arg: "node.cli.degrees" },
+  { key: "owner.info", group: "where", read: "cli.about.owner.info", write: "cli.about.owner.info.set", arg: "node.cli.ownerInfo" },
+  { key: "public.key", group: "where", read: "cli.about.public.key" },
+  { key: "role", group: "where", read: "cli.about.role" },
   // Access.
-  { key: "guest.password", arg: "node.cli.password" },
-  { key: "allow.read.only", values: ONOFF },
+  { key: "prv.key", group: "access", write: "cli.about.prv.key.set", arg: "node.cli.privateKey" },
+  { key: "guest.password", group: "access", read: "cli.about.guest.password", write: "cli.about.guest.password.set", arg: "node.cli.password" },
+  { key: "allow.read.only", group: "access", read: "cli.about.allow.read.only", write: "cli.about.allow.read.only.set", values: ONOFF },
   // Power and board.
-  { key: "adc.multiplier", arg: "node.cli.adcMultiplier" },
-  { key: "bootloader.ver", set: false },
-  { key: "pwrmgt.support", set: false },
-  { key: "pwrmgt.source", set: false },
-  { key: "pwrmgt.bootreason", set: false },
-  { key: "pwrmgt.bootmv", set: false },
+  { key: "adc.multiplier", group: "power", read: "cli.about.adc.multiplier", write: "cli.about.adc.multiplier.set", arg: "node.cli.adcMultiplier" },
+  { key: "bootloader.ver", group: "power", read: "cli.about.bootloader.ver" },
+  { key: "pwrmgt.support", group: "power", read: "cli.about.pwrmgt.support" },
+  { key: "pwrmgt.source", group: "power", read: "cli.about.pwrmgt.source" },
+  { key: "pwrmgt.bootreason", group: "power", read: "cli.about.pwrmgt.bootreason" },
+  { key: "pwrmgt.bootmv", group: "power", read: "cli.about.pwrmgt.bootmv" },
+  { key: "fan", group: "power", read: "cli.about.fan", write: "cli.about.fan.set", values: ["auto", "on", "off", "timeout "] },
   // Bridge builds.
-  { key: "bridge.type", set: false },
-  { key: "bridge.enabled", values: ONOFF },
-  { key: "bridge.delay", arg: "node.cli.bridgeDelay" },
-  { key: "bridge.source", values: ["rx", "tx"] },
-  { key: "bridge.baud", arg: "node.cli.bridgeBaud" },
-  { key: "bridge.channel", arg: "node.cli.bridgeChannel" },
-  { key: "bridge.secret", arg: "node.cli.secret" },
+  { key: "bridge.type", group: "net", read: "cli.about.bridge.type" },
+  { key: "bridge.enabled", group: "net", read: "cli.about.bridge.enabled", write: "cli.about.bridge.enabled.set", values: ONOFF },
+  { key: "bridge.delay", group: "net", read: "cli.about.bridge.delay", write: "cli.about.bridge.delay.set", arg: "node.cli.bridgeDelay" },
+  { key: "bridge.source", group: "net", read: "cli.about.bridge.source", write: "cli.about.bridge.source.set", values: ["rx", "tx"] },
+  { key: "bridge.baud", group: "net", read: "cli.about.bridge.baud", write: "cli.about.bridge.baud.set", arg: "node.cli.bridgeBaud" },
+  { key: "bridge.channel", group: "net", read: "cli.about.bridge.channel", write: "cli.about.bridge.channel.set", arg: "node.cli.bridgeChannel" },
+  { key: "bridge.secret", group: "net", read: "cli.about.bridge.secret", write: "cli.about.bridge.secret.set", arg: "node.cli.secret" },
   // MeshCoreTel.
-  { key: "cad", values: ONOFF },
-  { key: "extra.sf", arg: "node.cli.extraSf" },
-  { key: "radio.fem.rxgain", values: ONOFF },
-  { key: "radio.fem.txgain", values: ONOFF },
-  { key: "fan", values: ["auto", "on", "off", "timeout "] },
-  { key: "web", values: ONOFF },
-  { key: "web.stats", values: ONOFF, get: false },
-  { key: "web.status", set: false },
-  { key: "web.stats.status", set: false },
-  { key: "wifi.ssid", arg: "node.cli.ssid" },
-  { key: "wifi.pwd", arg: "node.cli.password", get: false },
-  { key: "wifi.powersaving", values: ["none", "min", "max"] },
-  { key: "wifi.status", set: false },
-  { key: "mqtt.status", values: ONOFF, get: false },
-  { key: "mqtt.statuscfg", set: false },
-  { key: "mqtt.client_version", set: false },
-  { key: "mqtt.iata", arg: "node.cli.iata" },
-  { key: "mqtt.owner", arg: "node.cli.mqttOwner" },
-  { key: "mqtt.email", arg: "node.cli.email" },
-  { key: "mqtt.packets", values: ONOFF },
-  { key: "mqtt.raw", values: ONOFF },
-  { key: "mqtt.tx", arg: "node.cli.value" },
-  { key: "mqtt.meshcoretel", values: ONOFF },
-  { key: "mqtt.letsmesh-eu", values: ONOFF },
-  { key: "mqtt.letsmesh-us", values: ONOFF },
+  { key: "web", group: "net", read: "cli.about.web", write: "cli.about.web.set", values: ONOFF },
+  { key: "web.stats", group: "net", write: "cli.about.web.stats.set", values: ONOFF },
+  { key: "web.status", group: "net", read: "cli.about.web.status" },
+  { key: "web.stats.status", group: "net", read: "cli.about.web.stats.status" },
+  { key: "wifi.ssid", group: "net", read: "cli.about.wifi.ssid", write: "cli.about.wifi.ssid.set", arg: "node.cli.ssid" },
+  { key: "wifi.pwd", group: "net", write: "cli.about.wifi.pwd.set", arg: "node.cli.password" },
+  { key: "wifi.powersaving", group: "net", read: "cli.about.wifi.powersaving", write: "cli.about.wifi.powersaving.set", values: ["none", "min", "max"] },
+  { key: "wifi.status", group: "net", read: "cli.about.wifi.status" },
+  { key: "mqtt.status", group: "net", write: "cli.about.mqtt.status.set", values: ONOFF },
+  { key: "mqtt.statuscfg", group: "net", read: "cli.about.mqtt.statuscfg" },
+  { key: "mqtt.client_version", group: "net", read: "cli.about.mqtt.client_version" },
+  { key: "mqtt.iata", group: "net", read: "cli.about.mqtt.iata", write: "cli.about.mqtt.iata.set", arg: "node.cli.iata" },
+  { key: "mqtt.owner", group: "net", read: "cli.about.mqtt.owner", write: "cli.about.mqtt.owner.set", arg: "node.cli.mqttOwner" },
+  { key: "mqtt.email", group: "net", read: "cli.about.mqtt.email", write: "cli.about.mqtt.email.set", arg: "node.cli.email" },
+  { key: "mqtt.packets", group: "net", read: "cli.about.mqtt.packets", write: "cli.about.mqtt.packets.set", values: ONOFF },
+  { key: "mqtt.raw", group: "net", read: "cli.about.mqtt.raw", write: "cli.about.mqtt.raw.set", values: ONOFF },
+  { key: "mqtt.tx", group: "net", read: "cli.about.mqtt.tx", write: "cli.about.mqtt.tx.set", arg: "node.cli.value" },
+  { key: "mqtt.meshcoretel", group: "net", read: "cli.about.mqtt.meshcoretel", write: "cli.about.mqtt.meshcoretel.set", values: ONOFF },
+  { key: "mqtt.letsmesh-eu", group: "net", read: "cli.about.mqtt.letsmesh-eu", write: "cli.about.mqtt.letsmesh-eu.set", values: ONOFF },
+  { key: "mqtt.letsmesh-us", group: "net", read: "cli.about.mqtt.letsmesh-us", write: "cli.about.mqtt.letsmesh-us.set", values: ONOFF },
 ];
 
 const PLAIN: CliCommand[] = [
-  { text: "ver" },
-  { text: "board" },
-  { text: "clock" },
-  { text: "clock sync" },
-  { text: "time ", arg: "node.cli.time" },
-  { text: "advert" },
-  { text: "advert.zerohop" },
-  { text: "neighbors" },
-  { text: "discover.neighbors" },
-  { text: "neighbor.remove ", arg: "node.cli.publicKey" },
-  { text: "clear stats" },
-  { text: "powersaving" },
-  { text: "powersaving ", values: ONOFF },
-  { text: "tempradio ", arg: "node.cli.tempradio" },
-  { text: "password ", arg: "node.cli.newPassword" },
-  { text: "setperm ", arg: "node.cli.setperm" },
-  { text: "log start" },
-  { text: "log stop" },
-  { text: "log erase" },
-  { text: "sensor list" },
-  { text: "sensor get ", arg: "node.cli.key" },
-  { text: "sensor set ", arg: "node.cli.keyValue" },
-  { text: "gps" },
-  { text: "gps ", values: ["on", "off", "sync", "setloc", "advert", "diag"] },
-  { text: "gps advert ", values: ["none", "share", "prefs"] },
-  { text: "region" },
-  { text: "region ", values: ["load", "save", "home", "default", "get ", "put ", "remove ", "allowf ", "denyf ", "list ", "def "] },
-  { text: "region home ", arg: "node.cli.region" },
-  { text: "region default ", arg: "node.cli.regionDefault" },
-  { text: "region get ", arg: "node.cli.region" },
-  { text: "region put ", arg: "node.cli.regionPut" },
-  { text: "region remove ", arg: "node.cli.region" },
-  { text: "region allowf ", arg: "node.cli.region" },
-  { text: "region denyf ", arg: "node.cli.region" },
-  { text: "region list ", values: ["allowed", "denied"] },
-  { text: "region def ", arg: "node.cli.regionTree" },
-  { text: "reboot" },
-  { text: "clkreboot" },
-  { text: "poweroff" },
-  { text: "shutdown" },
-  // 1.18: battery, USB, solar charger and charging as the board sees them.
-  { text: "power" },
-  { text: "start ota" },
-  // MeshCoreTel.
-  { text: "memory" },
-  { text: "eth.status" },
-  { text: "send mqtt.status" },
-  { text: "time.force ", arg: "node.cli.epochSeconds" },
+  { text: "ver", about: "cli.about.ver", group: "node" },
+  { text: "board", about: "cli.about.board", group: "node" },
+  { text: "memory", about: "cli.about.memory", group: "node" },
+  { text: "clock", about: "cli.about.clock", group: "node" },
+  { text: "clock sync", about: "cli.about.clockSync", group: "node" },
+  { text: "time ", about: "cli.about.time", group: "node", arg: "node.cli.time" },
+  { text: "power", about: "cli.about.power", group: "node" },
+  { text: "powersaving", about: "cli.about.powersaving", group: "node" },
+  { text: "powersaving ", about: "cli.about.powersaving.set", group: "node", values: ONOFF },
+  { text: "reboot", about: "cli.about.reboot", group: "node" },
+  { text: "clkreboot", about: "cli.about.clkreboot", group: "node" },
+  { text: "poweroff", about: "cli.about.poweroff", group: "node" },
+  { text: "shutdown", about: "cli.about.shutdown", group: "node" },
+  { text: "start ota", about: "cli.about.startOta", group: "node" },
+  { text: "log start", about: "cli.about.logStart", group: "node" },
+  { text: "log stop", about: "cli.about.logStop", group: "node" },
+  { text: "log erase", about: "cli.about.logErase", group: "node" },
+  { text: "clear stats", about: "cli.about.clearStats", group: "node" },
+  { text: "advert", about: "cli.about.advert", group: "advert" },
+  { text: "advert.zerohop", about: "cli.about.advertZeroHop", group: "advert" },
+  { text: "discover.neighbors", about: "cli.about.discoverNeighbors", group: "advert" },
+  { text: "neighbors", about: "cli.about.neighbors", group: "advert" },
+  { text: "neighbor.remove ", about: "cli.about.neighborRemove", group: "advert", arg: "node.cli.publicKey" },
+  { text: "gps", about: "cli.about.gps", group: "where" },
+  { text: "gps ", about: "cli.about.gps.set", group: "where", values: ["on", "off", "sync", "setloc", "advert", "diag"] },
+  { text: "gps advert ", about: "cli.about.gpsAdvert", group: "where", values: ["none", "share", "prefs"] },
+  { text: "region", about: "cli.about.region", group: "where" },
+  { text: "region ", about: "cli.about.region.set", group: "where", values: ["load", "save", "home", "default", "get ", "put ", "remove ", "allowf ", "denyf ", "list ", "def "] },
+  { text: "region home ", about: "cli.about.regionHome", group: "where", arg: "node.cli.region" },
+  { text: "region default ", about: "cli.about.regionDefault", group: "where", arg: "node.cli.regionDefault" },
+  { text: "region get ", about: "cli.about.regionGet", group: "where", arg: "node.cli.region" },
+  { text: "region put ", about: "cli.about.regionPut", group: "where", arg: "node.cli.regionPut" },
+  { text: "region remove ", about: "cli.about.regionRemove", group: "where", arg: "node.cli.region" },
+  { text: "region allowf ", about: "cli.about.regionAllow", group: "where", arg: "node.cli.region" },
+  { text: "region denyf ", about: "cli.about.regionDeny", group: "where", arg: "node.cli.region" },
+  { text: "region list ", about: "cli.about.regionList", group: "where", values: ["allowed", "denied"] },
+  { text: "region def ", about: "cli.about.regionDef", group: "where", arg: "node.cli.regionTree" },
+  { text: "time.force ", about: "cli.about.timeForce", group: "where", arg: "node.cli.epochSeconds" },
+  { text: "tempradio ", about: "cli.about.tempradio", group: "power", arg: "node.cli.tempradio" },
+  { text: "password ", about: "cli.about.password", group: "access", arg: "node.cli.newPassword" },
+  { text: "setperm ", about: "cli.about.setperm", group: "access", arg: "node.cli.setperm" },
+  { text: "eth.status", about: "cli.about.ethStatus", group: "net" },
+  { text: "send mqtt.status", about: "cli.about.sendMqttStatus", group: "net" },
+  { text: "sensor list", about: "cli.about.sensorList", group: "sensors" },
+  { text: "sensor get ", about: "cli.about.sensorGet", group: "sensors", arg: "node.cli.key" },
+  { text: "sensor set ", about: "cli.about.sensorSet", group: "sensors", arg: "node.cli.keyValue" },
 ];
 
 function commandsOf(plain: CliCommand[], settings: Setting[]): CliCommand[] {
   return [
     ...plain,
-    ...settings.filter((s) => s.get !== false).map((s) => ({ text: `get ${s.key}` })),
-    ...settings.filter((s) => s.set !== false).map((s): CliCommand => ({ text: `set ${s.key} `, ...(s.arg ? { arg: s.arg } : {}), ...(s.values ? { values: s.values } : {}) })),
+    ...settings.flatMap((s) => (s.read ? [{ text: `get ${s.key}`, about: s.read, group: s.group }] : [])),
+    ...settings.flatMap((s) =>
+      s.write
+        ? [
+            {
+              text: `set ${s.key} `,
+              about: s.write,
+              group: s.group,
+              ...(s.arg ? { arg: s.arg } : {}),
+              ...(s.values ? { values: s.values } : {}),
+            },
+          ]
+        : [],
+    ),
   ];
 }
 
@@ -174,33 +215,40 @@ export const COMMANDS: CliCommand[] = commandsOf(PLAIN, SETTINGS);
  * answers the `wifi.*` ones "Unknown command".
  */
 const RADIO_SETTINGS: Setting[] = [
-  { key: "radio", arg: "node.cli.radio" },
-  { key: "freq", set: false },
-  { key: "tx", arg: "node.cli.dbm" },
-  { key: "dutycycle", arg: "node.cli.dutycycle" },
-  { key: "af", arg: "node.cli.af" },
-  { key: "radio.rxgain", values: ONOFF },
-  { key: "int.thresh", arg: "node.cli.intThresh" },
-  { key: "cad", values: ONOFF },
+  { key: "radio", group: "radio", read: "cli.about.radio", write: "cli.about.radio.set", arg: "node.cli.radio" },
+  { key: "freq", group: "radio", read: "cli.about.freq" },
+  { key: "tx", group: "radio", read: "cli.about.tx", write: "cli.about.tx.set", arg: "node.cli.dbm" },
+  { key: "dutycycle", group: "radio", read: "cli.about.dutycycle", write: "cli.about.dutycycle.set", arg: "node.cli.dutycycle" },
+  { key: "af", group: "radio", read: "cli.about.af", write: "cli.about.af.set", arg: "node.cli.af" },
+  { key: "radio.rxgain", group: "radio", read: "cli.about.radio.rxgain", write: "cli.about.radio.rxgain.set", values: ONOFF },
+  { key: "int.thresh", group: "radio", read: "cli.about.int.thresh", write: "cli.about.int.thresh.set", arg: "node.cli.intThresh" },
+  { key: "cad", group: "radio", read: "cli.about.cad", write: "cli.about.cad.set", values: ONOFF },
   // Heltec V4, V4 R8, Tracker V2 and T096 only; other boards answer "Unknown command".
-  { key: "radio.fem.rxgain", values: ONOFF },
-  { key: "agc.reset.interval", arg: "node.cli.agcReset" },
-  { key: "path.hash.mode", values: ["0", "1", "2"], arg: "node.cli.pathHash" },
-  { key: "txdelay", arg: "node.cli.txdelay" },
-  { key: "direct.txdelay", arg: "node.cli.txdelay" },
-  { key: "rxdelay", arg: "node.cli.rxdelay" },
-  { key: "multi.acks", values: ["0", "1"] },
-  { key: "name", arg: "node.cli.name" },
-  { key: "pin", get: false, arg: "node.cli.pin" },
-  { key: "tz.offset", arg: "node.cli.tzOffset" },
-  { key: "wifi.ssid", arg: "node.cli.ssid" },
-  { key: "wifi.pwd", arg: "node.cli.password" },
-  { key: "wifi.enabled", values: ["0", "1"] },
-  { key: "wifi.status", set: false },
-  { key: "wifi.ip", set: false },
+  { key: "radio.fem.rxgain", group: "radio", read: "cli.about.radio.fem.rxgain", write: "cli.about.radio.fem.rxgain.set", values: ONOFF },
+  { key: "agc.reset.interval", group: "radio", read: "cli.about.agc.reset.interval", write: "cli.about.agc.reset.interval.set", arg: "node.cli.agcReset" },
+  { key: "path.hash.mode", group: "radio", read: "cli.about.path.hash.mode", write: "cli.about.path.hash.mode.set", values: ["0", "1", "2"], arg: "node.cli.pathHash" },
+  { key: "txdelay", group: "repeat", read: "cli.about.txdelay", write: "cli.about.txdelay.set", arg: "node.cli.txdelay" },
+  { key: "direct.txdelay", group: "repeat", read: "cli.about.direct.txdelay", write: "cli.about.direct.txdelay.set", arg: "node.cli.txdelay" },
+  { key: "rxdelay", group: "repeat", read: "cli.about.rxdelay", write: "cli.about.rxdelay.set", arg: "node.cli.rxdelay" },
+  { key: "multi.acks", group: "repeat", read: "cli.about.multi.acks", write: "cli.about.multi.acks.set", values: ["0", "1"] },
+  { key: "name", group: "where", read: "cli.about.name", write: "cli.about.name.set", arg: "node.cli.name" },
+  { key: "pin", group: "access", write: "cli.about.pin", arg: "node.cli.pin" },
+  { key: "tz.offset", group: "where", read: "cli.about.tz.offset", write: "cli.about.tz.offset.set", arg: "node.cli.tzOffset" },
+  { key: "wifi.ssid", group: "net", read: "cli.about.wifi.ssid", write: "cli.about.wifi.ssid.set", arg: "node.cli.ssid" },
+  { key: "wifi.pwd", group: "net", write: "cli.about.wifi.pwd.set", arg: "node.cli.password" },
+  { key: "wifi.enabled", group: "net", write: "cli.about.wifi.enabled", values: ["0", "1"] },
+  { key: "wifi.status", group: "net", read: "cli.about.wifi.status" },
+  { key: "wifi.ip", group: "net", read: "cli.about.wifi.ip" },
 ];
 
-const RADIO_PLAIN: CliCommand[] = [{ text: "ver" }, { text: "board" }, { text: "set wifi.clear" }, { text: "reboot" }, { text: "poweroff" }, { text: "shutdown" }];
+const RADIO_PLAIN: CliCommand[] = [
+  { text: "ver", about: "cli.about.ver", group: "node" },
+  { text: "board", about: "cli.about.board", group: "node" },
+  { text: "set wifi.clear", about: "cli.about.wifiClear", group: "net" },
+  { text: "reboot", about: "cli.about.reboot", group: "node" },
+  { text: "poweroff", about: "cli.about.poweroff", group: "node" },
+  { text: "shutdown", about: "cli.about.shutdown", group: "node" },
+];
 
 export const RADIO_COMMANDS: CliCommand[] = commandsOf(RADIO_PLAIN, RADIO_SETTINGS);
 
@@ -218,18 +266,35 @@ export interface Suggestion {
   label: string;
   /** What a tap puts in the field. */
   fill: string;
+  /** What it does; a value has none. */
+  about?: Key;
+}
+
+export interface Suggestions {
+  chips: Suggestion[];
+  /** What the value after the first chip is, once a command that takes one is in front. */
+  hint: string | null;
+  /** How many commands match what is typed, of which the chips are the first `limit`. */
+  total: number;
 }
 
 /**
  * What to offer for what is typed so far. Typed up to a command that takes
  * a value: the values it takes, and what a value is. Otherwise the commands
  * that start with it, then those with it anywhere in them, so "duty" finds
- * both `get dutycycle` and `set dutycycle`.
+ * both `get dutycycle` and `set dutycycle`. Each comes with the words of what
+ * it does, for the list beside the field and the reference.
  */
-export function suggest(draft: string, target: CliTarget = "node", limit = 12): { chips: Suggestion[]; hint: string | null } {
+export function suggest(draft: string, target: CliTarget = "node", limit = 12): Suggestions {
   const list = target === "radio" ? RADIO_COMMANDS : COMMANDS;
   const typed = draft.replace(/^\s+/, "").replace(/\s+/g, " ").toLowerCase();
-  if (typed.trim() === "") return { chips: FIRST[target].map((c) => ({ label: c, fill: c })), hint: null };
+  if (typed.trim() === "") {
+    const chips = FIRST[target].map((text): Suggestion => {
+      const found = list.find((c) => c.text.trim() === text);
+      return { label: text, fill: text, ...(found ? { about: found.about } : {}) };
+    });
+    return { chips, hint: null, total: chips.length };
+  }
   // The longest command typed in full, with its value to come or on its way; "set repeat" is as good as "set repeat ".
   const full = list.some((c) => c.values && c.text === `${typed} `) ? `${typed} ` : typed;
   const at = list.filter((c) => c.text.endsWith(" ") && full.startsWith(c.text) && (c.arg || c.values)).sort((a, b) => b.text.length - a.text.length)[0];
@@ -238,7 +303,7 @@ export function suggest(draft: string, target: CliTarget = "node", limit = 12): 
     const deeper = list.some((c) => c !== at && c.text.startsWith(full) && c.text.length > full.length);
     if (!deeper || rest.length > 0 || at.values) {
       const chips = (at.values ?? []).filter((v) => v.startsWith(rest) && v !== rest).map((v) => ({ label: v.trim(), fill: at.text + v }));
-      return { chips, hint: at.arg ? t(at.arg) : null };
+      return { chips, hint: at.arg ? t(at.arg) : null, total: chips.length };
     }
   }
   const word = typed.trim();
@@ -246,12 +311,15 @@ export function suggest(draft: string, target: CliTarget = "node", limit = 12): 
   const inside = word.length >= 2 ? list.filter((c) => !c.text.startsWith(typed) && c.text.includes(word)) : [];
   const seen = new Set<string>();
   const chips: Suggestion[] = [];
+  let total = 0;
   for (const c of [...starts, ...inside]) {
     const label = c.text.trim();
     if (seen.has(label)) continue;
     seen.add(label);
-    chips.push({ label, fill: c.text });
-    if (chips.length >= limit) break;
+    total += 1;
+    if (chips.length < limit) chips.push({ label, fill: c.text, about: c.about });
   }
-  return { chips, hint: null };
+  // What the value after the first suggestion is: that is what Tab fills in.
+  const first = chips[0] ? list.find((c) => c.text.trim() === chips[0]!.label) : undefined;
+  return { chips, hint: first?.arg ? t(first.arg) : null, total };
 }

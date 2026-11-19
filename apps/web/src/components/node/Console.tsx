@@ -3,14 +3,19 @@ import { AdvType, type ConsoleEntry, type ContactRecord } from "@meshnet/meshcor
 import { t } from "../../i18n/index.js";
 import { suggest } from "../../lib/cli.js";
 import { dayLabel, timeOfDay } from "../../lib/format.js";
+import { useWide } from "../../lib/layout.js";
+import { usePress } from "../../lib/press.js";
 import { hasSavedPassword, readPassword } from "../../lib/secrets.js";
 import { session, useSession } from "../../lib/session.js";
 import { toast } from "../../lib/toast.js";
 import { errorText } from "../../i18n/errors.js";
-import { Button } from "../../ui/Button.js";
+import { Button, IconButton } from "../../ui/Button.js";
 import { Confirm } from "../../ui/Dialog.js";
+import { SearchField } from "../../ui/Field.js";
 import { showMenu, type MenuItem } from "../../ui/Menu.js";
-import { CopyIcon, RefreshIcon, SendIcon } from "../Icons.js";
+import { Sheet } from "../../ui/Sheet.js";
+import { CloseIcon, CopyIcon, HelpIcon, RefreshIcon, SendIcon, TrashIcon } from "../Icons.js";
+import { CommandList } from "./CommandHelp.js";
 import { SignIn } from "./SignIn.js";
 
 /** Commands that take a node down, move it, or lock people out. */
@@ -18,6 +23,9 @@ const DANGEROUS = /^(reboot|clkreboot|erase|start ota|poweroff|shutdown|set radi
 
 /** When the app started; the console keeps what came before it. */
 const STARTED = Date.now();
+
+/** What the field offers at once; the rest waits in the reference. */
+const PICK_ROWS = 4;
 
 function sameDay(a: number, b: number): boolean {
   return new Date(a).toDateString() === new Date(b).toDateString();
@@ -29,6 +37,7 @@ function sameDay(a: number, b: number): boolean {
  */
 export function Console(props: { contact: ContactRecord } | { own: true }) {
   const state = useSession();
+  const wide = useWide();
   const contact = "contact" in props ? props.contact : null;
   const key = contact?.key ?? state.self?.key ?? "";
   const name = contact ? contact.name || contact.prefix : (state.self?.name ?? "");
@@ -43,12 +52,17 @@ export function Console(props: { contact: ContactRecord } | { own: true }) {
   const [asking, setAsking] = useState(false);
   const [relearning, setRelearning] = useState(false);
   const [focused, setFocused] = useState(false);
+  // The reference of what can be typed: a sheet on a phone, a panel beside the console on a wide screen.
+  const [helping, setHelping] = useState(false);
+  const [query, setQuery] = useState("");
+  const [holding, setHolding] = useState(false);
   // The last command went unanswered: the node may no longer know its way back to us. One kept
   // from before the app started says nothing of the way now.
   const last = entries.at(-1);
   const lost = contact !== null && last?.status === "timeout" && last.at >= STARTED;
   // A person's radio (MeshCore 1.18) answers only those it lets control it, and there is no sign-in to find a way back with.
   const person = contact?.type === AdvType.Chat;
+  const target = contact && !person ? "node" : "radio";
 
   /** A sign-in by flood with the saved password, or the sheet to type one. */
   const relearn = async () => {
@@ -96,6 +110,33 @@ export function Console(props: { contact: ContactRecord } | { own: true }) {
     else run(command);
   };
 
+  /** A command from the reference: the field takes it, and the reference makes room for the console again. */
+  const pick = (command: string) => {
+    setDraft(command);
+    setRecall(null);
+    setHelping(false);
+    // The sheet goes first, then the field: a phone keeps the keyboard down while the sheet is up.
+    setTimeout(() => input.current?.focus(), 80);
+  };
+
+  const openHelp = () => {
+    setQuery("");
+    setHelping(true);
+  };
+
+  // Held, the button offers what else can be done with the console; tapped, it opens the reference.
+  const helpPress = usePress(
+    (at) =>
+      showMenu(
+        [
+          { label: t("cli.title"), icon: <HelpIcon size={17} />, onSelect: openHelp },
+          { label: t("cli.clearHistory"), icon: <TrashIcon size={17} />, group: true, onSelect: () => session.clearConsole(key) },
+        ],
+        { at },
+      ),
+    setHolding,
+  );
+
   /** What can be done with an entry, as in the MeshCore app: copy the command or its answer, or send it again. */
   const menuOf = (entry: ConsoleEntry, e: MouseEvent<HTMLButtonElement>) => {
     // A masked command's text here is not the command, so it is neither copied nor sent.
@@ -118,7 +159,7 @@ export function Console(props: { contact: ContactRecord } | { own: true }) {
   };
 
   const typed = draft.trim();
-  const { chips, hint } = suggest(draft, contact && !person ? "node" : "radio");
+  const { chips, hint, total } = suggest(draft, target);
 
   const past = entries.filter((e) => e.command && !e.command.includes("••")).map((e) => e.command);
   const onKey = (e: KeyboardEvent<HTMLInputElement>) => {
@@ -137,7 +178,7 @@ export function Console(props: { contact: ContactRecord } | { own: true }) {
     setDraft(next === past.length ? "" : past[next]!);
   };
 
-  return (
+  const body = (
     <>
       <div className="console" ref={log} aria-live="polite">
         {entries.map((entry, i) => (
@@ -162,27 +203,48 @@ export function Console(props: { contact: ContactRecord } | { own: true }) {
       </div>
       {/* The same frame as a chat's composer, so a command is written the way a message is. */}
       <form className={["compose", "console-compose", focused ? "focus" : "", draft ? "has" : "", online ? "" : "waiting"].join(" ")} onSubmit={submit}>
-        <div className="chips console-chips">
-          {chips.map((s) => (
-            <button
-              key={s.fill}
-              type="button"
-              className="chip mono"
-              onClick={() => {
-                setDraft(s.fill);
-                input.current?.focus();
-              }}
-            >
-              {s.label}
-            </button>
-          ))}
-          {entries.length > 0 ? (
-            <button type="button" className="chip" onClick={() => session.clearConsole(key)}>
-              {t("common.clear")}
-            </button>
-          ) : null}
-        </div>
-        {hint ? <span className="console-hint mono">{hint}</span> : null}
+        {/* Nothing typed: the everyday commands, a tap away. Something typed: what it can be, and what that does. */}
+        {typed ? (
+          <div className="cli-pick">
+            {chips.slice(0, PICK_ROWS).map((s, i) => (
+              <button
+                key={s.fill}
+                type="button"
+                className={["cli-pick-row", i === 0 ? "on" : ""].join(" ")}
+                onClick={() => {
+                  setDraft(s.fill);
+                  input.current?.focus();
+                }}
+              >
+                <span className="cli-pick-cmd">{s.label}</span>
+                {s.about ? <span className="cli-pick-desc">{t(s.about)}</span> : null}
+              </button>
+            ))}
+            {total > PICK_ROWS ? <span className="cli-pick-more">{t("cli.more", { count: total - PICK_ROWS })}</span> : null}
+            {hint ? <span className="cli-pick-hint">{t("cli.whatToEnter", { hint })}</span> : null}
+          </div>
+        ) : (
+          <div className="chips console-chips">
+            {chips.map((s) => (
+              <button
+                key={s.fill}
+                type="button"
+                className="chip mono"
+                onClick={() => {
+                  setDraft(s.fill);
+                  input.current?.focus();
+                }}
+              >
+                {s.label}
+              </button>
+            ))}
+            {entries.length > 0 ? (
+              <button type="button" className="chip" onClick={() => session.clearConsole(key)}>
+                {t("common.clear")}
+              </button>
+            ) : null}
+          </div>
+        )}
         <div className="compose-box">
           <div className="compose-row">
             <div className="compose-field">
@@ -202,6 +264,23 @@ export function Console(props: { contact: ContactRecord } | { own: true }) {
                 onBlur={() => setFocused(false)}
               />
             </div>
+            {/* The same quiet button as a chat's paperclip: tapped it opens the reference, held it offers the rest. */}
+            <button
+              type="button"
+              className={["compose-send", "attach", "cli-help-btn", holding ? "holding" : ""].join(" ")}
+              aria-label={t("cli.title")}
+              title={t("cli.title")}
+              onMouseDown={(e) => e.preventDefault()}
+              onClick={openHelp}
+              {...helpPress}
+            >
+              {holding ? (
+                <svg className="hold-ring" viewBox="0 0 46 46" aria-hidden="true">
+                  <circle cx="23" cy="23" r="21" />
+                </svg>
+              ) : null}
+              <HelpIcon size={18} />
+            </button>
             <button
               type="submit"
               className={["compose-send", online && typed ? "ready" : "idle"].join(" ")}
@@ -214,6 +293,41 @@ export function Console(props: { contact: ContactRecord } | { own: true }) {
           </div>
         </div>
       </form>
+    </>
+  );
+
+  return (
+    <>
+      {wide && helping ? (
+        <div className="console-split">
+          <div className="console-pane">{body}</div>
+          <aside className="cli-help">
+            <div className="cli-help-head">
+              <span className="cli-help-title">{t("cli.title")}</span>
+              <IconButton label={t("common.close")} onClick={() => setHelping(false)}>
+                <CloseIcon size={18} />
+              </IconButton>
+            </div>
+            <SearchField
+              value={query}
+              onValue={setQuery}
+              aria-label={t("cli.search")}
+              placeholder={t("cli.search")}
+              autoComplete="off"
+              autoCapitalize="off"
+              spellCheck={false}
+            />
+            <CommandList target={target} query={query} onPick={pick} />
+          </aside>
+        </div>
+      ) : (
+        <div className="console-pane">{body}</div>
+      )}
+      {!wide ? (
+        <Sheet open={helping} onClose={() => setHelping(false)} title={t("cli.title")} find={<SearchField value={query} onValue={setQuery} aria-label={t("cli.search")} placeholder={t("cli.search")} />}>
+          <CommandList target={target} query={query} onPick={pick} />
+        </Sheet>
+      ) : null}
       {contact && !person ? (
         <SignIn
           open={asking}

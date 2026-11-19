@@ -215,12 +215,129 @@ button.c-cmd:focus-visible {
   font-family: var(--font-ui);
   color: var(--text-faint);
 }
-/* What the value after the command is, once the command is typed. */
-.console-hint {
-  display: block;
-  padding: 0 0 var(--space-2) var(--space-1);
-  font-size: var(--text-xs);
+/* A console and what is typed into it, side by side with the reference on a wide screen. */
+.console-pane {
+  flex: 1;
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.console-split {
+  flex: 1;
+  min-height: 0;
+  display: flex;
+}
+/* What is typed can be: the commands that match it, each with a line about what it does. */
+.cli-pick {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 0 0 var(--space-1);
+}
+.cli-pick-row {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  width: 100%;
+  padding: var(--space-2) var(--space-3);
+  border: 0;
+  border-radius: var(--radius-lg);
+  background: none;
+  color: inherit;
+  font: inherit;
+  text-align: left;
+  cursor: pointer;
+}
+/* The first one is what Tab and Enter take. */
+.cli-pick-row.on {
+  background: var(--selected);
+}
+@media (hover: hover) {
+  .cli-pick-row:hover {
+    background: var(--hover);
+  }
+  .cli-pick-row.on:hover {
+    background: var(--selected);
+  }
+}
+.cli-pick-cmd {
+  font-family: var(--font-mono);
+  font-size: var(--text-sm);
+  color: var(--text);
+}
+.cli-pick-desc {
+  font-size: var(--text-sm);
+  line-height: 1.35;
   color: var(--text-muted);
+}
+/* How many more there are, and where: the rest waits in the reference. */
+.cli-pick-more {
+  padding: 2px var(--space-3) 0;
+  font-size: var(--text-xs);
+  color: var(--text-faint);
+}
+/* What the value after the first one is. */
+.cli-pick-hint {
+  padding: 2px var(--space-3) var(--space-1);
+  font-size: var(--text-xs);
+  line-height: 1.35;
+  color: var(--text-muted);
+}
+/* The reference of every command: a panel beside the console, in the console's own tab. */
+.cli-help {
+  flex: none;
+  width: calc(360px * var(--box-scale));
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+  border-left: 1px solid var(--border);
+  background: var(--panel);
+}
+.cli-help-head {
+  display: flex;
+  align-items: center;
+  gap: var(--space-2);
+  padding: var(--space-3) var(--space-3) var(--space-2);
+}
+.cli-help-title {
+  flex: 1;
+  min-width: 0;
+  font-weight: 600;
+}
+/* What a command's list is for, before the list: which firmware answers what. */
+.cli-note {
+  margin: var(--space-2) var(--space-3);
+  padding: var(--space-2) var(--space-3);
+  border-radius: var(--radius-lg);
+  background: var(--accent-subtle);
+  font-size: var(--text-sm);
+  line-height: 1.35;
+}
+/* A command in the reference: its name in the console's letters, what it does under it. */
+.cli-row {
+  align-items: center;
+}
+.cli-row .row-main {
+  gap: 2px;
+}
+.cli-row .row-title {
+  font-family: var(--font-mono);
+  font-weight: 500;
+  font-size: var(--text-base);
+  white-space: normal;
+  overflow: visible;
+}
+.cli-row .row-sub {
+  line-height: 1.35;
+  white-space: normal;
+  overflow: visible;
+  text-overflow: clip;
+}
+.cli-chev {
+  flex: none;
+  display: flex;
+  color: var(--text-faint);
 }
 .multiline {
   white-space: pre-line;

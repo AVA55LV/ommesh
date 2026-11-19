@@ -67,6 +67,7 @@ export const DoubleCheckIcon = icon('<path d="M3 12.5l4.5 4.5L14 10.5"/><path d=
 export const AlertIcon = icon('<path d="M12 4l9 16H3z"/><path d="M12 10v4M12 17v.5"/>');
 export const ClockIcon = icon('<circle cx="12" cy="12" r="8"/><path d="M12 8v4l3 2"/>');
 export const InfoIcon = icon('<circle cx="12" cy="12" r="8.5"/><path d="M12 11v5M12 8v.5"/>');
+export const HelpIcon = icon('<circle cx="12" cy="12" r="8.5"/><path d="M9.6 9.7a2.5 2.5 0 0 1 4.9.5c0 1.6-2.5 1.9-2.5 3.3"/><path d="M12 17v.5"/>');
 export const PlusIcon = icon('<path d="M12 5v14M5 12h14"/>');
 export const TrashIcon = icon('<path d="M4 7h16M9 7V4h6v3M6 7l1 13h10l1-13"/>');
 export const CopyIcon = icon('<rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V5a1 1 0 0 0-1-1H5a1 1 0 0 0-1 1v10a1 1 0 0 0 1 1h3"/>');
