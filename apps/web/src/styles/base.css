@@ -10,9 +10,13 @@
 
   /* The reader's text size (theme/textSize.ts), as a share of the sizes below. Text grows by all of
      it; a box that holds a line of text grows by half as much, enough to keep the line inside
-     without the layout ballooning. Icons, gaps and hairlines keep their size. */
+     without the layout ballooning. Chrome around the content (the rail, tab bar, list pane and big
+     headings) stops growing at 150% so the frame still fits around 200% text. Icons, gaps and
+     hairlines keep their size. */
   --text-scale: 1;
   --box-scale: calc(0.5 + var(--text-scale) / 2);
+  --chrome-scale: min(var(--text-scale), 1.5);
+  --chrome-box: calc(0.5 + var(--chrome-scale) / 2);
 
   --text-xs: calc(11px * var(--text-scale));
   --text-sm: calc(12px * var(--text-scale));
@@ -31,9 +35,9 @@
   --font-ui: "IBM Plex Sans", ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
   --font-mono: ui-monospace, "SF Mono", "Cascadia Mono", "JetBrains Mono", Menlo, monospace;
 
-  --rail-width: calc(66px * var(--box-scale));
-  --pane-width: calc(320px * var(--box-scale));
-  --tabbar-height: calc(52px * var(--box-scale));
+  --rail-width: calc(66px * var(--chrome-box));
+  --pane-width: min(calc(320px * var(--chrome-box)), 42vw);
+  --tabbar-height: calc(52px * var(--chrome-box));
 
   --avatar-l: 62%;
   --avatar-c: 0.11;

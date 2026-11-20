@@ -11,8 +11,8 @@ const KEY = "meshnet.textSize";
 /** The phone's share as last read, so the app opens at it before the shell has answered again. */
 const SYSTEM_KEY = "meshnet.textSize.system";
 
-/** The steps offered, smallest to largest. Past the largest the layout stops holding together. */
-export const TEXT_STEPS = [0.9, 1, 1.15, 1.3, 1.5] as const;
+/** The steps offered, smallest to largest. Frame chrome caps itself so the layout holds at 200%. */
+export const TEXT_STEPS = [0.9, 1, 1.15, 1.3, 1.5, 1.75, 2] as const;
 
 /** `"system"` to follow the phone, or a step as a string: `"1.15"`. */
 export type TextSizePreference = string;
@@ -27,7 +27,7 @@ interface SystemTextPlugin {
 const listeners = new Set<() => void>();
 let plugin: SystemTextPlugin | null = null;
 let preference: TextSizePreference = read(KEY) ?? "system";
-let system = clamp(Number(read(SYSTEM_KEY) ?? 1));
+let system = clampTextScale(Number(read(SYSTEM_KEY) ?? 1));
 
 function read(key: string): string | null {
   try {
@@ -37,7 +37,7 @@ function read(key: string): string | null {
   }
 }
 
-function clamp(scale: number): number {
+export function clampTextScale(scale: number): number {
   if (!Number.isFinite(scale) || scale <= 0) return 1;
   return Math.min(Math.max(...TEXT_STEPS), Math.max(Math.min(...TEXT_STEPS), Math.round(scale * 100) / 100));
 }
@@ -57,7 +57,7 @@ export function getSystemTextScale(): number {
 
 /** The share the text is drawn at now. */
 export function getTextScale(): number {
-  return preference === "system" ? system : clamp(Number(preference));
+  return preference === "system" ? system : clampTextScale(Number(preference));
 }
 
 export function subscribeTextSize(listener: () => void): () => void {
@@ -109,8 +109,8 @@ async function refreshSystem(): Promise<void> {
   } catch {
     return;
   }
-  if (next === null || clamp(next) === system) return;
-  system = clamp(next);
+  if (next === null || clampTextScale(next) === system) return;
+  system = clampTextScale(next);
   try {
     localStorage.setItem(SYSTEM_KEY, String(system));
   } catch {

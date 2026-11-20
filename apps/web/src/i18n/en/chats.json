@@ -104,6 +104,7 @@
     "other": "Latest message, {count} new messages below"
   },
   "chat.toDay": "Go to a day",
+  "chat.resetZoom": "Reset text size",
   "next.pull": "Pull up to open it",
   "next.release": "Let go to open it",
   "next.none": "No more unread chats",

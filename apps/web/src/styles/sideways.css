@@ -31,7 +31,7 @@
 }
 :root.sideways :is(.app.narrow > .tabbar, .content > .under-tabs) {
   grid-auto-flow: row;
-  grid-auto-rows: calc(56px * var(--box-scale));
+  grid-auto-rows: calc(56px * var(--chrome-box));
   align-content: center;
   width: calc(var(--rail-width) + var(--safe-left));
   height: auto;

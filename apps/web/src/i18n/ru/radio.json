@@ -461,6 +461,7 @@
   "appearance.themeHint": "One Light или One Dark, как в системе",
   "appearance.textSize": "Размер текста",
   "appearance.phoneTextSize": "Размер текста телефона, {percent}",
+  "appearance.pinchHint": "В чате можно развести пальцы, чтобы временно увеличить сообщения.",
   "appearance.sampleIn": "Кто-нибудь слышит меня из долины?",
   "appearance.sampleOut": "Слышу отлично, два хопа.",
   "appearance.largeEmoji": "Крупные эмодзи",

@@ -34,7 +34,14 @@ export function usePull(ref: RefObject<HTMLElement | null>, onPull: () => void, 
     const atEdge = () => (edge === "top" ? el.scrollTop <= 0 : el.scrollHeight - el.scrollTop - el.clientHeight < 2);
     const down = (e: TouchEvent) => {
       const t = e.touches[0];
-      start = e.touches.length === 1 && t && atEdge() ? { x: t.clientX, y: t.clientY } : null;
+      if (e.touches.length !== 1 || !t || !atEdge()) {
+        if (pulling || distance) setPull(0);
+        start = null;
+        pulling = false;
+        distance = 0;
+        return;
+      }
+      start = { x: t.clientX, y: t.clientY };
       pulling = false;
     };
     const move = (e: TouchEvent) => {

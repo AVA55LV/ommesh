@@ -44,7 +44,7 @@
   display: flex;
   flex-direction: column;
   align-items: flex-start;
-  max-width: min(80%, 560px);
+  max-width: min(80%, calc(560px * var(--box-scale)));
 }
 .msg.out .msg-col {
   align-items: flex-end;
@@ -221,15 +221,15 @@
   border-radius: 12px;
 }
 .jumbo .msg-text {
-  font-size: calc(72px * var(--text-scale));
+  font-size: calc(72px * min(var(--text-scale), 1.5));
   line-height: 1;
   white-space: nowrap;
 }
 .jumbo-2 .msg-text {
-  font-size: calc(56px * var(--text-scale));
+  font-size: calc(56px * min(var(--text-scale), 1.5));
 }
 .jumbo-3 .msg-text {
-  font-size: calc(44px * var(--text-scale));
+  font-size: calc(44px * min(var(--text-scale), 1.5));
 }
 .jumbo .msg-meta {
   float: none;
@@ -284,7 +284,7 @@
   display: inline-flex;
   align-items: center;
   gap: 4px;
-  height: calc(24px * var(--box-scale));
+  min-height: calc(24px * var(--box-scale));
   padding: 0 8px 0 6px;
   border: 0;
   border-radius: 12px;

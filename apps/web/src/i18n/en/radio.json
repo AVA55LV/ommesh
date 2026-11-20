@@ -461,6 +461,7 @@
   "appearance.themeHint": "One Light or One Dark, as the system is set",
   "appearance.textSize": "Text size",
   "appearance.phoneTextSize": "The phone's text size, {percent}",
+  "appearance.pinchHint": "Pinch in a chat to zoom its messages for a moment.",
   "appearance.sampleIn": "Anyone hearing me from the valley?",
   "appearance.sampleOut": "Loud and clear, two hops.",
   "appearance.largeEmoji": "Large emoji",

@@ -22,7 +22,7 @@ import { previewSignal } from "../lib/chime.js";
 import { push, type RadioPage } from "../lib/nav.js";
 import { useOwnConsole } from "../lib/ownConsole.js";
 import { canLocate, locateOnce, locateText, phoneLocates } from "../lib/phonePosition.js";
-import { canHover, nativePlatform, shell } from "../lib/platform.js";
+import { canHover, nativePlatform, shell, touchFirst } from "../lib/platform.js";
 import { reach, trustUsed, withBase } from "../lib/privacy.js";
 import { recentStops, relayAvailable, relayWanted, setRelayWanted, setSharing, useRelay, type AppStop } from "../lib/relay.js";
 import { setSharedSettings, useSharedSettings } from "../lib/sharedSettings.js";
@@ -1225,7 +1225,7 @@ function AppearancePage() {
         </Block>
         <LinkRow label={radioTitle("background")} value={t(BACKGROUND_NAMES[background])} onClick={() => push({ kind: "radio", page: "background" })} />
       </Group>
-      <Group title={t("radio.appearance.textSize")}>
+      <Group title={t("radio.appearance.textSize")} note={touchFirst() ? t("radio.appearance.pinchHint") : undefined}>
         {hasSystemTextSize() ? (
           <SwitchRow label={t("common.followSystem")} hint={t("radio.appearance.phoneTextSize", { percent: percent(system) })} checked={textSize === "system"} onChange={(v) => setTextSizePreference(v ? "system" : String(TEXT_STEPS[step] ?? 1))} />
         ) : null}

@@ -6,7 +6,7 @@
  * message field's pin is, times a held mouse button too.
  */
 
-import { useRef, type MouseEvent, type PointerEvent } from "react";
+import { useEffect, useRef, type MouseEvent, type PointerEvent } from "react";
 import { haptic } from "./haptic.js";
 
 export type MenuAt = { x: number; y: number } | null;
@@ -44,12 +44,20 @@ export function usePress(onMenu: (at: MenuAt) => void, onHolding?: (holding: boo
   const timer = useRef<ReturnType<typeof setTimeout> | null>(null);
   const start = useRef<{ x: number; y: number } | null>(null);
   const fired = useRef(false);
+  const pointer = useRef<number | null>(null);
+  const cancelOther = useRef<((e: globalThis.PointerEvent) => void) | null>(null);
   const clear = () => {
+    if (cancelOther.current) {
+      document.removeEventListener("pointerdown", cancelOther.current, true);
+      cancelOther.current = null;
+    }
+    pointer.current = null;
     if (timer.current === null) return;
     clearTimeout(timer.current);
     timer.current = null;
     onHolding?.(false);
   };
+  useEffect(() => clear, []);
   return {
     onPointerDown: (e: PointerEvent) => {
       fired.current = false;
@@ -58,7 +66,21 @@ export function usePress(onMenu: (at: MenuAt) => void, onHolding?: (holding: boo
       const at = { x: e.clientX, y: e.clientY };
       start.current = at;
       clear();
+      pointer.current = e.pointerId;
+      // A second finger landing anywhere (a pinch, say) cancels a pending hold rather than opening the menu.
+      if (!mouse) {
+        const stop = (other: globalThis.PointerEvent) => {
+          if (other.pointerId !== pointer.current) clear();
+        };
+        cancelOther.current = stop;
+        document.addEventListener("pointerdown", stop, true);
+      }
       timer.current = setTimeout(() => {
+        if (cancelOther.current) {
+          document.removeEventListener("pointerdown", cancelOther.current, true);
+          cancelOther.current = null;
+        }
+        pointer.current = null;
         timer.current = null;
         fired.current = true;
         swallowClick();

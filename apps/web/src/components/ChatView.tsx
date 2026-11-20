@@ -11,6 +11,8 @@ import { daysIn, messagesIn, shownIn, titleOf, type ConversationSummary, type Sh
 import { nameOfHash, relaysOf } from "../lib/echoes.js";
 import { getOpenAtUnread, takeUnread } from "../lib/firstUnread.js";
 import { useFloatingDay } from "../lib/floatingDay.js";
+import { useChatZoom } from "../lib/chatZoom.js";
+import { getTextScale, subscribeTextSize } from "../theme/textSize.js";
 import { formulaHtml, formulasReady, loadFormulas, onFormulas } from "../lib/formula.js";
 import { haptic } from "../lib/haptic.js";
 import { dayLabel, emojiOnly, fullDate, timeOfDay } from "../lib/format.js";
@@ -616,6 +618,9 @@ export function ChatView({ conversation, chrome, infoOpen, onInfo }: { conversat
   const pickingNow = useRef(selecting);
   pickingNow.current = selecting;
 
+  const textScale = useSyncExternalStore(subscribeTextSize, getTextScale);
+  const zoom = useChatZoom(scroller, inner, textScale, conversation, measure);
+
   useReveal(
     scroller,
     inner,
@@ -725,6 +730,14 @@ export function ChatView({ conversation, chrome, infoOpen, onInfo }: { conversat
         </div>
       </div>
 
+      {/* Shown while messages are pinched larger or smaller (#130); a tap returns them to the reader's usual text size. */}
+      <div className="chat-zoom-slot">
+        <button ref={zoom.pill} type="button" className="chat-zoom" aria-label={t("chats.chat.resetZoom")} onClick={zoom.reset}>
+          <span className="chat-zoom-value" />
+          <CloseIcon size={12} />
+        </button>
+      </div>
+
       <div
         className="chat-scroll"
         ref={scroller}
@@ -737,7 +750,8 @@ export function ChatView({ conversation, chrome, infoOpen, onInfo }: { conversat
         onTouchStart={() => {
           touching.current = true;
         }}
-        onTouchEnd={() => {
+        onTouchEnd={(e) => {
+          if (e.touches.length > 0) return;
           touching.current = false;
           drawWhenStill();
         }}
@@ -1669,15 +1683,37 @@ function useReveal(scroller: React.RefObject<HTMLDivElement | null>, inner: Reac
     let mode: "reveal" | "reply" | null = null;
     let row: HTMLElement | null = null;
     let pulled = 0;
+    const clear = () => {
+      if (mode === "reveal") {
+        body.style.transition = "";
+        body.style.transform = "";
+      } else if (mode === "reply" && row) {
+        row.style.transition = "";
+        row.style.transform = "";
+        row.style.removeProperty("--pull");
+      }
+      start = null;
+      mode = null;
+      row = null;
+      pulled = 0;
+    };
     const down = (e: TouchEvent) => {
       const t = e.touches[0];
+      if (!t || e.touches.length !== 1 || t.clientX < EDGE || off.current) {
+        clear();
+        return;
+      }
       // From the edge, the pull is Back's; the bubble under it stays put.
-      start = t && e.touches.length === 1 && t.clientX >= EDGE && !off.current ? { x: t.clientX, y: t.clientY } : null;
+      start = { x: t.clientX, y: t.clientY };
       row = e.target instanceof Element ? e.target.closest<HTMLElement>("[data-reply]") : null;
       mode = null;
       pulled = 0;
     };
     const move = (e: TouchEvent) => {
+      if (e.touches.length !== 1) {
+        if (mode || start) clear();
+        return;
+      }
       const t = e.touches[0];
       if (!start || !t) return;
       const dx = t.clientX - start.x;

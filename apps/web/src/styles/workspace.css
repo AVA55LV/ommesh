@@ -66,11 +66,11 @@
   background: transparent;
   color: var(--text-muted);
   font: inherit;
-  font-size: var(--text-xs);
+  font-size: calc(11px * var(--chrome-scale));
   cursor: pointer;
 }
 .rail button {
-  height: calc(54px * var(--box-scale));
+  height: calc(54px * var(--chrome-box));
 }
 @media (hover: hover) {
   .rail button:hover,
@@ -121,22 +121,22 @@
   font-size: var(--text-sm);
 }
 .rail .rail-search {
-  height: calc(36px * var(--box-scale));
+  height: calc(36px * var(--chrome-box));
   margin-bottom: var(--space-2);
 }
 .tab-badge {
   position: absolute;
   top: 4px;
   left: calc(50% + 4px);
-  min-width: calc(16px * var(--text-scale));
-  height: calc(16px * var(--text-scale));
+  min-width: calc(16px * var(--chrome-scale));
+  height: calc(16px * var(--chrome-scale));
   padding: 0 4px;
   border-radius: 999px;
   background: var(--accent);
   color: var(--accent-contrast);
-  font-size: calc(10px * var(--text-scale));
+  font-size: calc(10px * var(--chrome-scale));
   font-weight: 600;
-  line-height: calc(16px * var(--text-scale));
+  line-height: calc(16px * var(--chrome-scale));
 }
 .tab-dot {
   position: absolute;
@@ -173,7 +173,7 @@
   border-top: 1px solid var(--border);
 }
 .tabbar button {
-  font-size: var(--text-xs);
+  font-size: calc(11px * var(--chrome-scale));
 }
 /* Android lifts the whole page above the keyboard, tab bar and all. The tab bar stays behind,
    under the keyboard, as it does where the page follows the keyboard itself (base.css). */
