@@ -5,6 +5,7 @@
 ## Unreleased
 
 ### Chats
+- Text size now goes up to 200% (Settings › Appearance › Text size adds 175% and 200%, and follows a phone's own setting up to 200% too). On a touch screen you can also pinch in a chat with two fingers to make its messages larger for a moment — up to 300%, wrapped to the screen so there is no panning sideways — and leaving the chat, pinching back or tapping the percentage badge returns it to your usual size.
 - The list of who can be named with @ in a channel or a room scrolls: five names show at once, and everyone else who wrote there or is among your contacts is a scroll away, the arrow keys bringing each into sight. It used to stop at six names, and the rest could not be reached at all.
 - Attach a photo or a file by pasting it from the clipboard: copy a screenshot, or a file in the file manager, and press Ctrl+V (⌘V on a Mac) in the message field. The attachment goes to the bucket as the clip's own does, and a link lands in the field; several files copied at once go one after another, each with its link.
 - A bucket of your own that sits in the path of an address, the way a MinIO behind a proxy does, is now said so with a switch on the attachments server page: the app cannot tell it from a bucket with a name of its own when both are on the web's own port.
