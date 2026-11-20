@@ -232,9 +232,9 @@ Ommesh делают те, кто пишет код, и те, кто провер
   </tr>
   <tr>
     <td align="center" valign="top" width="120"><img src="https://avatars.githubusercontent.com/u/265430841?v=4&s=128" width="64" height="64" alt="" /><br /><b>AVA55LV</b></td>
+    <td align="center" valign="top" width="120"><img src="https://avatars.githubusercontent.com/u/158148571?v=4&s=128" width="64" height="64" alt="" /><br /><b>eugenyk74</b></td>
     <td align="center" valign="top" width="120"><img src="https://avatars.githubusercontent.com/u/319381555?v=4&s=128" width="64" height="64" alt="" /><br /><b>YaziAranea</b></td>
     <td align="center" valign="top" width="120"><img src="https://avatars.githubusercontent.com/u/9005584?v=4&s=128" width="64" height="64" alt="" /><br /><b>deNoi5e</b></td>
-    <td align="center" valign="top" width="120"><img src="https://avatars.githubusercontent.com/u/158148571?v=4&s=128" width="64" height="64" alt="" /><br /><b>eugenyk74</b></td>
     <td align="center" valign="top" width="120"><img src="https://avatars.githubusercontent.com/u/119757495?v=4&s=128" width="64" height="64" alt="" /><br /><b>LekSPS</b></td>
     <td align="center" valign="top" width="120"><img src="https://avatars.githubusercontent.com/u/20921671?v=4&s=128" width="64" height="64" alt="" /><br /><b>innightwolfsleep</b></td>
   </tr>
