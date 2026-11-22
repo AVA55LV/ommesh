@@ -2,7 +2,7 @@
 
 [Русская версия](CHANGELOG.ru.md)
 
-## Unreleased
+## 0.13.0 — 2026-11-23
 
 ### Chats
 - Text size now goes up to 200% (Settings › Appearance › Text size adds 175% and 200%, and follows a phone's own setting up to 200% too). On a touch screen you can also pinch in a chat with two fingers to make its messages larger for a moment — up to 300%, wrapped to the screen so there is no panning sideways — and leaving the chat, pinching back or tapping the percentage badge returns it to your usual size.
