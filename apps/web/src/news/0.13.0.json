@@ -1,0 +1,86 @@
+{
+  "version": "0.13.0",
+  "date": "2026-11-23",
+  "items": [
+    {
+      "kind": "new",
+      "show": "radio/attachments",
+      "en": {
+        "title": "Photos, files and short links in chat",
+        "text": "Hold the clip or paste from the clipboard to send a photo or file to your own S3 bucket; long links offer Shorten so they fit in one message."
+      },
+      "ru": {
+        "title": "Фото, файлы и короткие ссылки в чатах",
+        "text": "Удержите скрепку или вставьте из буфера, чтобы отправить фото или файл в свою S3-корзину; длинную ссылку можно сократить, чтобы влезла в сообщение."
+      }
+    },
+    {
+      "kind": "new",
+      "show": "radio/appearance",
+      "en": {
+        "title": "Text up to 200% and pinch-to-zoom in chat",
+        "text": "Text size now reaches 200% in Appearance and from the phone's setting. On a touch screen, pinch in a chat to zoom messages up to 300% for a moment."
+      },
+      "ru": {
+        "title": "Текст до 200% и увеличение щипком в чатах",
+        "text": "Размер текста в «Оформлении» и от телефона теперь доходит до 200%. На сенсорном экране сообщения в чате можно временно увеличить двумя пальцами до 300%."
+      }
+    },
+    {
+      "kind": "new",
+      "show": "radio/console",
+      "en": {
+        "title": "Console hints and a command reference",
+        "text": "Matching commands appear as you type with what each does and takes, searchable by meaning. Tap ? for the full firmware reference, or hold it to clear history."
+      },
+      "ru": {
+        "title": "Подсказки и справка по командам консоли",
+        "text": "По мере ввода консоль показывает команды с пояснением и параметрами — ищет и по смыслу. Кнопка «?» открывает справку по прошивке, удержание чистит историю."
+      }
+    },
+    {
+      "kind": "new",
+      "show": "mesh",
+      "en": {
+        "title": "Coverage survey tiles right on the map",
+        "text": "A survey draws 200 m honeycomb cells like nw.ommesh.ru, coloured by the best reply, with your tile ringed and a course arrow while moving."
+      },
+      "ru": {
+        "title": "Соты замера покрытия прямо на карте",
+        "text": "Замер рисует 200-метровые соты как на nw.ommesh.ru — цветом по лучшему ответу, с обводкой вашей соты и стрелкой курса на ходу."
+      }
+    },
+    {
+      "kind": "new",
+      "show": "chats",
+      "en": {
+        "title": "Add by key, or block a sender in channels",
+        "text": "New chat › By key adds a person from a key or meshcore:// link before their advert arrives. Hold a message in a channel or room to block the sender."
+      },
+      "ru": {
+        "title": "Добавить по ключу и заблокировать в канале",
+        "text": "«Новый чат › По ключу» добавляет человека по ключу или ссылке meshcore:// ещё до анонса. Удержите сообщение в канале или комнате, чтобы заблокировать автора."
+      }
+    },
+    {
+      "kind": "fix",
+      "en": "Typing @ in a channel lists your contacts too and scrolls past six names.",
+      "ru": "По @ в канале видны и контакты, а список имён теперь прокручивается."
+    },
+    {
+      "kind": "fix",
+      "en": "Battery Now shows the radio's last reading, not its half-hour mean.",
+      "ru": "«Сейчас» на листе батареи — последнее показание радио, не среднее."
+    },
+    {
+      "kind": "fix",
+      "en": "Surveys go to nw.ommesh.ru, and the send box fits a narrow phone.",
+      "ru": "Замеры идут на nw.ommesh.ru, а окно отправки влезает на узкий экран."
+    },
+    {
+      "kind": "fix",
+      "en": "Arrow keys also move along Ctrl+Tab recent chats on desktop.",
+      "ru": "По недавним чатам Ctrl+Tab на ПК можно ходить стрелками."
+    }
+  ]
+}
