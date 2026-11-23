@@ -1,0 +1,9 @@
+/.symbian/
+/build/
+__pycache__/
+*.pyc
+*.sis
+*.sisx
+*.pem
+*.key
+.venv/

@@ -1,0 +1,78 @@
+--- a/cpp/symbian/e32/imports.cc
++++ b/cpp/symbian/e32/imports.cc
+@@ -113,7 +113,8 @@
+   // The project may declare more compatible proxies than this image uses.
+   // Only the ELF's needed/version records become E32 import blocks.
+   const size_t needed_count = needs.size / 32;
+-  if (symbols.size < 32 || symbols.size > 1025 * 16 ||
++  // Qt plus the static HTTPS runtime needs more than 1024 dynamic symbols.
++  if (symbols.size < 32 || symbols.size > 2049 * 16 ||
+       symbols.entry_size != 16 || symbols.size % 16 ||
+       symbols.link >= sections.size() || dynamic.link != symbols.link ||
+       versions.link != indices.at(11) || needs.link != symbols.link ||
+@@ -211,7 +211,7 @@
+     const Section& data_relocs = sections[result.data_relocation_index];
+     if (data_relocs.flags != 2 || data_relocs.info != 0 ||
+         data_relocs.entry_size != 8 || data_relocs.size == 0 ||
+-        data_relocs.size > 256 * 8 || data_relocs.size % 8) {
++        data_relocs.size > 1024 * 8 || data_relocs.size % 8) {
+       return absl::DataLossError("Invalid imported data relocation table");
+     }
+     expected.emplace(17, data_relocs.address);  // DT_REL
+@@ -377,7 +377,8 @@
+           type == 2 && function) {
+         const auto owner = std::find_if(
+             sections.begin(), sections.end(), [&](const Section& section) {
+-              return (section.name == ".rodata" || section.name == ".text") &&
++              return (section.name == ".rodata" || section.name == ".text" ||
++                      section.name == ".data.rel.ro") &&
+                      section.type == 1 && (section.flags & 2) != 0 &&
+                      location >= section.address &&
+                      Within(section.size, location - section.address, 4);
+@@ -441,19 +442,23 @@
+       }
+       uint32_t addend = 0;
+       if (type == 21) {
++        const auto previous = result.objects.find(*name);
+         if (object_got == nullptr || object_got->type != 1 ||
+             object_got->flags != 3 || location < object_got->address ||
+             !Within(object_got->size, location - object_got->address, 4) ||
+             Read32(elf, object_got->offset + location - object_got->address) !=
+                 0 ||
+-            result.objects.contains(*name)) {
++            (previous != result.objects.end() &&
++             result.object_slots.contains(previous->second))) {
+           return absl::DataLossError("Invalid imported object GOT slot");
+         }
+         result.object_slots.insert(location - code.address);
++        result.objects.insert_or_assign(*name, location - code.address);
+       } else {
+         const auto owner = std::find_if(
+             sections.begin(), sections.end(), [&](const Section& section) {
+-              return (section.name == ".rodata" || section.name == ".text") &&
++              return (section.name == ".rodata" || section.name == ".text" ||
++                      section.name == ".data.rel.ro") &&
+                      section.type == 1 && (section.flags & 2) != 0 &&
+                      location >= section.address &&
+                      Within(section.size, location - section.address, 4);
+@@ -671,7 +677,7 @@
+     for (size_t j = 0; j < slots; ++j, p += 4) {
+       const uint32_t offset = Read32(section, p);
+       if (offset < 16 || offset % 4 || !Within(code.size(), offset, 4) ||
+-          !locations.insert(offset).second || locations.size() > 1024 ||
++          !locations.insert(offset).second || locations.size() > 2048 ||
+           (!block.slots.empty() && offset <= block.slots.back().code_offset)) {
+         return absl::DataLossError("Invalid E32 import code offset");
+       }
+--- a/cpp/symbian/e32/e32.cc
++++ b/cpp/symbian/e32/e32.cc
+@@ -276,7 +276,8 @@
+                   imports->code_function_pointers.find(location);
+               code_pointer != imports->code_function_pointers.end()) {
+             if (symbol_type != 2 || code_pointer->second != *name ||
+-                (target.name != ".rodata" && target.name != ".text") ||
++                (target.name != ".rodata" && target.name != ".text" &&
++                 target.name != ".data.rel.ro") ||
+                 target_in_data ||
+                 Read32(elf, target.offset + location - target.address) != 0) {
+               return absl::DataLossError(

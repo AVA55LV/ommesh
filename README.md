@@ -18,6 +18,12 @@
   <p><a href="#install">Install</a> · <a href="#features">Features</a> · <a href="#screenshots">Screenshots</a> · <a href="#development">Development</a> · <a href="#people">People</a></p>
 </div>
 
+## OMMesh Belle for Nokia
+
+This fork adds an unofficial native Symbian Belle client for MeshCore. The app connects to a MeshCore Companion Wi-Fi radio over TCP and provides direct messages, channels, routes, offline maps, and radio tools. Nokia 700 is the primary target. Version 0.2.17 displayed its interface on Nokia X7, C7, and E6 firmware in EKA2L1.
+
+[Symbian installation, features, and device compatibility (Russian)](apps/symbian/README.md)
+
 ![Ommesh desktop: mesh map, nearby nodes and repeater status](docs/screenshots/desktop-mesh.png)
 
 **Ommesh** is a companion client for [MeshCore](https://github.com/meshcore-dev/MeshCore) LoRa radios. Connect a compatible radio over **Bluetooth, USB or Wi-Fi** and exchange messages through the mesh without an internet connection for messaging. Conversations stay on your device; the radio carries them over the air.

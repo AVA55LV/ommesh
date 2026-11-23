@@ -1,0 +1,61 @@
+#ifndef OMMESH_BELLE_RADIO_CONSOLE_HPP
+#define OMMESH_BELLE_RADIO_CONSOLE_HPP
+
+#include "meshcore.hpp"
+
+#include <functional>
+
+namespace meshcore {
+
+class RadioConsole {
+public:
+    enum Operation { Local = 1, Login = 2, Remote = 3 };
+
+    struct Link {
+        std::function<bool(const Bytes&)> send;
+        // Releases the synchronous request slot. An over-the-air reply may still be pending.
+        std::function<void()> released;
+        std::function<void(int, int, bool, const std::string&)> result;
+        std::function<std::int64_t()> now;
+        std::function<std::uint32_t()> unixSeconds;
+    };
+
+    explicit RadioConsole(Link link);
+    void start(int requestId, int operation, const Key* fullKey, std::string_view input);
+    bool accept(std::span<const std::uint8_t> frame);
+    void tick();
+    void close();
+    bool busy() const;
+    bool authorized(const Key& fullKey) const;
+
+private:
+    struct Result {
+        bool success;
+        std::string text;
+    };
+
+    struct Request {
+        int id;
+        int operation;
+        Key key;
+        std::array<std::uint8_t, 3> tag;
+        std::int64_t remoteDeadline = 0;
+        std::optional<Result> early;
+    };
+
+    bool acceptCommandReply(std::span<const std::uint8_t> frame);
+    std::optional<Result> overTheAirReply(std::span<const std::uint8_t> frame) const;
+    void finish(Result result);
+    void forgetAuthorization(const Key& key);
+
+    Link link_;
+    std::optional<Request> pending_;
+    std::vector<Key> administrators_;
+    std::optional<std::uint8_t> nextTag_;
+    std::int64_t nextRadioCommand_ = 0;
+    std::uint32_t lastTimestamp_ = 0;
+};
+
+}
+
+#endif

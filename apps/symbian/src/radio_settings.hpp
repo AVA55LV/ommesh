@@ -1,0 +1,185 @@
+#ifndef OMMESH_BELLE_RADIO_SETTINGS_HPP
+#define OMMESH_BELLE_RADIO_SETTINGS_HPP
+
+#include <QtCore/QElapsedTimer>
+#include <QtCore/QPointer>
+#include <QtCore/QSettings>
+#include <QtGui/QDialog>
+#include <QtGui/QWidget>
+
+class Client;
+class ChatAppearancePreview;
+class NativeVibration;
+class NodeMap;
+class QButtonGroup;
+class QLabel;
+class QComboBox;
+class QLineEdit;
+class QPushButton;
+class QTextEdit;
+
+void showNodeTools(Client& client, const QString& id, QWidget* parent);
+void configureNodeMap(NodeMap* map);
+
+class RadioSettingsPanel : public QWidget {
+    Q_OBJECT
+
+public:
+    RadioSettingsPanel(Client& client, QWidget* parent);
+    ~RadioSettingsPanel() override;
+    bool filter(const QString& query);
+    QWidget* makeConnectionPreferences(QWidget* parent);
+
+public slots:
+    void editChannels();
+    void addChannel();
+    void advertise();
+    void updateStatus();
+
+signals:
+    void detailRequested(QWidget* page, const QString& title);
+    void mapSettingsRequested();
+    void appearanceChanged(int theme, int chatTextSize);
+    void connectionSettingsRequested();
+    void exitRequested();
+
+private slots:
+    void setReconnect(bool enabled);
+    void setVibration(bool enabled);
+    void onIncomingMessage(const QString& target);
+    void testVibration();
+    void refreshMessages();
+    void refreshInventory();
+    void showIdentity();
+    void showInfo();
+    void showParameters();
+    void showBattery();
+    void showContacts();
+    void showLocation();
+    void showAdvanced();
+    void showNotifications();
+    void showLog();
+    void showAbout();
+    void showMessagePreferences();
+    void showBlockedSenders();
+    void unblockSender();
+    void setLookalikeDetailsVisible(bool visible);
+    void setLinkPreviewMode(int mode);
+    void changeSendTries();
+    void showAppearance();
+    void updateAppearanceSummary(int theme, int chatTextSize);
+    void setUserPreference(bool enabled);
+    void refreshBatteryReadout();
+    void openConsole();
+    void toggleDemo();
+
+private:
+    enum class Readout { Info, Identity, Parameters, Battery, Contacts, Location };
+    void displayReadout(Readout readout, const QString& title);
+    void saveToggle(const char* key, bool enabled, QLabel* feedback = nullptr);
+    void updateSendTriesControls(QWidget* controls);
+    void openChannels(bool adding);
+
+    Client& client_;
+    NativeVibration* vibration_;
+    QPointer<QPushButton> demo_;
+    QPushButton* nameRow_ = nullptr;
+    QPushButton* frequencyRow_ = nullptr;
+    QPushButton* batteryRow_ = nullptr;
+    QPushButton* contactsRow_ = nullptr;
+    QPushButton* locationRow_ = nullptr;
+    QPointer<QPushButton> channelsRow_;
+    QPushButton* connectionRow_ = nullptr;
+    QPushButton* notificationsRow_ = nullptr;
+    QPushButton* messagesRow_ = nullptr;
+    QPushButton* appearanceRow_ = nullptr;
+    QPointer<QPushButton> mapsRow_;
+    QPointer<QPushButton> refreshRow_;
+    QPointer<QLabel> notificationFeedback_;
+    QPointer<QLabel> connectionFeedback_;
+    QPointer<QLabel> liveReadout_;
+    Readout reading_ = Readout::Info;
+    QElapsedTimer lastVibration_;
+    bool vibrateOnMessage_ = false;
+};
+
+class AppearancePanel : public QWidget {
+    Q_OBJECT
+
+public:
+    explicit AppearancePanel(QWidget* parent);
+
+signals:
+    void appearanceChanged(int theme, int chatTextSize);
+
+private slots:
+    void selectTheme(int theme);
+    void setChatSize(int pixels);
+    void syncPreferences();
+
+private:
+    QSettings settings_;
+    QLabel* sizeValue_ = nullptr;
+    ChatAppearancePreview* preview_ = nullptr;
+    int theme_ = 0;
+    int chatTextSize_ = 0;
+};
+
+class RadioConsoleDialog : public QDialog {
+    Q_OBJECT
+
+public:
+    RadioConsoleDialog(Client& client, const QString& nodeId, const QString& title, QWidget* parent);
+
+private slots:
+    void submit();
+    void login();
+    void readyChanged();
+    void result(int requestId, int operation, bool success, const QString& text);
+
+private:
+    void append(const QString& text);
+    void updateControls();
+
+    Client& client_;
+    QString nodeId_;
+    QLabel* state_;
+    QLineEdit* password_;
+    QLineEdit* command_;
+    QPushButton* login_;
+    QPushButton* send_;
+    QTextEdit* output_;
+    QString transcript_;
+    int request_ = 0;
+    bool authorized_ = false;
+    bool connected_ = false;
+};
+
+class RadioChannelsDialog : public QDialog {
+    Q_OBJECT
+
+public:
+    RadioChannelsDialog(Client& client, QWidget* parent, bool adding = false);
+
+private slots:
+    void selectSlot(int index);
+    void saveChannel();
+    void clearChannel();
+    void receiveResult(int slot, bool success, const QString& text);
+
+private:
+    void populate(int preferredSlot);
+    void submit(const QString& name, const QString& hex);
+
+    Client& client_;
+    QComboBox* slots_;
+    QLineEdit* name_;
+    QLineEdit* key_;
+    QLabel* state_;
+    QPushButton* save_;
+    QPushButton* clear_;
+    int pendingSlot_ = -1;
+    const bool adding_;
+};
+
+#endif
