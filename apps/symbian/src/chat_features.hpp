@@ -6,6 +6,7 @@
 
 #include <QtCore/QPoint>
 #include <QtCore/QStringList>
+#include <QtGui/QBrush>
 #include <QtGui/QWidget>
 #include <optional>
 
@@ -49,6 +50,7 @@ public:
     void setSendingState(bool canSend, int maxBytes);
     void setPinned(bool pinned);
     void syncLinkPreviewMode();
+    void syncChatBackground();
     void setAppearance(const Appearance::Palette& palette, int chatTextSize);
 
 signals:
@@ -107,6 +109,7 @@ private:
     QPoint actionPosition_;
     bool actionBlockedRun_ = false;
     Appearance::Palette palette_;
+    QBrush backdrop_;
     int chatTextSize_;
     int maxBytes_;
     int reactionChoice_;

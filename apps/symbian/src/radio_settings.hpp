@@ -18,7 +18,6 @@ class QLineEdit;
 class QPushButton;
 class QTextEdit;
 
-void showNodeTools(Client& client, const QString& id, QWidget* parent);
 void configureNodeMap(NodeMap* map);
 
 class RadioSettingsPanel : public QWidget {
@@ -46,7 +45,7 @@ signals:
 private slots:
     void setReconnect(bool enabled);
     void setVibration(bool enabled);
-    void onIncomingMessage(const QString& target);
+    void onIncomingMessage(const QString& target, const QString& text, bool room);
     void testVibration();
     void refreshMessages();
     void refreshInventory();
@@ -99,7 +98,7 @@ private:
     QPointer<QLabel> connectionFeedback_;
     QPointer<QLabel> liveReadout_;
     Readout reading_ = Readout::Info;
-    QElapsedTimer lastVibration_;
+    QElapsedTimer lastNotification_;
     bool vibrateOnMessage_ = false;
 };
 
@@ -129,7 +128,8 @@ class RadioConsoleDialog : public QDialog {
     Q_OBJECT
 
 public:
-    RadioConsoleDialog(Client& client, const QString& nodeId, const QString& title, QWidget* parent);
+    RadioConsoleDialog(Client& client, const QString& nodeId, const QString& title, QWidget* parent,
+                       bool loginOnly = false);
 
 private slots:
     void submit();
@@ -143,12 +143,13 @@ private:
 
     Client& client_;
     QString nodeId_;
+    const bool loginOnly_;
     QLabel* state_;
     QLineEdit* password_;
-    QLineEdit* command_;
+    QLineEdit* command_ = nullptr;
     QPushButton* login_;
-    QPushButton* send_;
-    QTextEdit* output_;
+    QPushButton* send_ = nullptr;
+    QTextEdit* output_ = nullptr;
     QString transcript_;
     int request_ = 0;
     bool authorized_ = false;

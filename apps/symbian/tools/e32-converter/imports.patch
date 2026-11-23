@@ -1,6 +1,19 @@
 --- a/cpp/symbian/e32/imports.cc
 +++ b/cpp/symbian/e32/imports.cc
-@@ -113,7 +113,8 @@
+@@ -24,6 +24,12 @@
+ using analysis::internal::Read32;
+ using analysis::internal::Within;
+ 
++// Keep ELF import validation bounded. The Qt virtual methods used by Belle
++// can occupy multiple code slots for the same DLL ordinal.
++constexpr size_t kMaxElfImportSlots = 2560;
++constexpr uint32_t kMaxElfLibraryImports = 2048;
++constexpr size_t kMaxElfImportSectionSize = 13 * 1024;
++
+ absl::StatusOr<std::string> StringAt(std::string_view table, size_t offset) {
+   if (offset >= table.size()) {
+     return absl::DataLossError("Import string outside table");
+@@ -113,7 +119,8 @@
    // The project may declare more compatible proxies than this image uses.
    // Only the ELF's needed/version records become E32 import blocks.
    const size_t needed_count = needs.size / 32;
@@ -10,16 +23,25 @@
        symbols.entry_size != 16 || symbols.size % 16 ||
        symbols.link >= sections.size() || dynamic.link != symbols.link ||
        versions.link != indices.at(11) || needs.link != symbols.link ||
-@@ -211,7 +211,7 @@
+@@ -178,7 +185,7 @@
+   const Section& relocs = sections[result.relocation_index];
+   if (relocs.info >= sections.size() || relocs.info == 0 ||
+       relocs.flags != 0x42 || relocs.entry_size != 8 || relocs.size % 8 ||
+-      relocs.size == 0 || relocs.size > 1024 * 8) {
++      relocs.size == 0 || relocs.size > 1152 * 8) {
+     return absl::DataLossError("Invalid import relocation table");
+   }
+   result.got_index = relocs.info;
+@@ -211,7 +218,7 @@
      const Section& data_relocs = sections[result.data_relocation_index];
      if (data_relocs.flags != 2 || data_relocs.info != 0 ||
          data_relocs.entry_size != 8 || data_relocs.size == 0 ||
 -        data_relocs.size > 256 * 8 || data_relocs.size % 8) {
-+        data_relocs.size > 1024 * 8 || data_relocs.size % 8) {
++        data_relocs.size > 1536 * 8 || data_relocs.size % 8) {
        return absl::DataLossError("Invalid imported data relocation table");
      }
      expected.emplace(17, data_relocs.address);  // DT_REL
-@@ -377,7 +377,8 @@
+@@ -377,7 +384,8 @@
            type == 2 && function) {
          const auto owner = std::find_if(
              sections.begin(), sections.end(), [&](const Section& section) {
@@ -29,7 +51,7 @@
                       section.type == 1 && (section.flags & 2) != 0 &&
                       location >= section.address &&
                       Within(section.size, location - section.address, 4);
-@@ -441,19 +442,23 @@
+@@ -441,19 +449,23 @@
        }
        uint32_t addend = 0;
        if (type == 21) {
@@ -55,12 +77,32 @@
                       section.type == 1 && (section.flags & 2) != 0 &&
                       location >= section.address &&
                       Within(section.size, location - section.address, 4);
-@@ -671,7 +677,7 @@
+@@ -647,7 +659,8 @@
+ absl::StatusOr<std::vector<ImportBlock>> DecodeImports(std::string_view section,
+                                                        std::string_view code,
+                                                        uint32_t count) {
+-  if (count == 0 || count > 16 || section.size() < 4 || section.size() > 8192 ||
++  if (count == 0 || count > 16 || section.size() < 4 ||
++      section.size() > kMaxElfImportSectionSize ||
+       section.size() % 4 || Read32(section, 0) != section.size()) {
+     return absl::DataLossError("Invalid E32 import section size/count");
+   }
+@@ -663,7 +676,7 @@
+     const uint32_t slots = Read32(section, p + 4);
+     p += 8;
+     if (!DllName(*dll) || (!blocks.empty() && *dll <= blocks.back().dll) ||
+-        slots == 0 || slots > 1024 ||
++        slots == 0 || slots > kMaxElfLibraryImports ||
+         !Within(section.size(), p, static_cast<size_t>(slots) * 4)) {
+       return absl::DataLossError("Invalid E32 import block name/count");
+     }
+@@ -671,7 +684,8 @@
      for (size_t j = 0; j < slots; ++j, p += 4) {
        const uint32_t offset = Read32(section, p);
        if (offset < 16 || offset % 4 || !Within(code.size(), offset, 4) ||
 -          !locations.insert(offset).second || locations.size() > 1024 ||
-+          !locations.insert(offset).second || locations.size() > 2048 ||
++          !locations.insert(offset).second ||
++          locations.size() > kMaxElfImportSlots ||
            (!block.slots.empty() && offset <= block.slots.back().code_offset)) {
          return absl::DataLossError("Invalid E32 import code offset");
        }

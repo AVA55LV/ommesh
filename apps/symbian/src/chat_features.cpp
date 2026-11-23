@@ -1,6 +1,7 @@
 #include "chat_features.hpp"
 #include "link_preview.hpp"
 #include "message_text.hpp"
+#include "node_chat_options.hpp"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QCryptographicHash>
@@ -371,7 +372,7 @@ QRectF bubbleBounds(const QAbstractTextDocumentLayout* layout, QTextFrame* frame
                                                      -format.rightMargin(), -format.bottomMargin());
 }
 
-void maskBubbleCorners(QPainter& painter, const QRectF& bubble, const QColor& backdrop) {
+void maskBubbleCorners(QPainter& painter, const QRectF& bubble, const QBrush& backdrop) {
     const qreal radius = qMin<qreal>(12, qMin(bubble.width(), bubble.height()) / 2);
     if (radius <= 0)
         return;
@@ -405,7 +406,7 @@ protected:
         QPainter painter(viewport());
         painter.setClipRegion(event->region());
         painter.setRenderHint(QPainter::Antialiasing);
-        maskBubbleCorners(painter, bounds, backdrop_);
+        maskBubbleCorners(painter, bounds, QBrush(backdrop_));
     }
 
 private:
@@ -1068,6 +1069,12 @@ public:
     }
 
 protected:
+    void scrollContentsBy(int dx, int dy) override {
+        QTextEdit::scrollContentsBy(dx, dy);
+        if (owner_->backdrop_.style() == Qt::TexturePattern)
+            viewport()->update();
+    }
+
     void resizeEvent(QResizeEvent* event) {
         QScrollBar* scroll = verticalScrollBar();
         const bool follow = !touching() && scroll->value() == scroll->maximum();
@@ -1085,6 +1092,11 @@ protected:
     }
 
     void paintEvent(QPaintEvent* event) {
+        {
+            QPainter backdrop(viewport());
+            backdrop.setClipRegion(event->region());
+            backdrop.fillRect(event->rect(), owner_->backdrop_);
+        }
         QTextEdit::paintEvent(event);
         updateVisibleLinks();
         const qint64 now = receiptClock_.elapsed();
@@ -1236,7 +1248,7 @@ private:
             if (bounds.top() > documentDirty.bottom())
                 break;
             if (!frame->frameFormat().boolProperty(blockedRunMarker) && bounds.intersects(documentDirty))
-                maskBubbleCorners(painter, bounds.translated(-offset), owner_->palette_.canvas);
+                maskBubbleCorners(painter, bounds.translated(-offset), owner_->backdrop_);
         }
         painter.restore();
     }
@@ -1485,6 +1497,11 @@ void ChatView::syncLinkPreviewMode() {
     linkPreviews_->setMode(LinkPreview::preference());
 }
 
+void ChatView::syncChatBackground() {
+    backdrop_ = NodeChatOptions::backgroundBrush(NodeChatOptions::background(activeId_), palette_.canvas, palette_.accent);
+    history_->viewport()->update();
+}
+
 void ChatView::refreshLinkPreviews() {
     if (history_->touching()) {
         previewRefreshPending_ = true;
@@ -1503,9 +1520,10 @@ void ChatView::setAppearance(const Appearance::Palette& palette, int chatTextSiz
         "#nativeChat QLabel { color: @text; }"
         "#nativeChat QLabel#chatTitle { font-weight: bold; font-size: 18px; }"
         "#nativeChat QLabel#chatStatus, #nativeChat QLabel#chatByteLimit { color: @muted; font-size: 12px; }"
-        "#nativeChat QTextEdit { color: @text; background: @chrome; font-size: @sizepx; "
+        "#nativeChat QTextEdit { color: @text; font-size: @sizepx; "
         " border: 1px solid @border; border-radius: 6px; selection-background-color: @selection; }"
-        "#nativeChat QTextEdit#messageHistory { border: none; background: @canvas; }"
+        "#nativeChat QTextEdit#messageComposer { background: @chrome; }"
+        "#nativeChat QTextEdit#messageHistory { border: none; background: transparent; }"
         "#nativeChat QTextEdit#quotePreview { background: @chrome; border-left: 3px solid @accent; font-size: 14px; }"
         "#nativeChat QScrollBar:vertical { background: @chrome; width: 7px; margin: 0; }"
         "#nativeChat QScrollBar::handle:vertical { background: @border; min-height: 18px; border-radius: 3px; }"
@@ -1528,6 +1546,7 @@ void ChatView::setAppearance(const Appearance::Palette& palette, int chatTextSiz
     if (style == styleSheet())
         return;
     setStyleSheet(style);
+    syncChatBackground();
     quoteText_->setFixedHeight(qMax(50, chatTextSize_ * 2 + 10));
     showQuotePreview();
     if (!messages_.isEmpty())
@@ -1541,6 +1560,7 @@ void ChatView::setContext(const QString& title, const QString& status, const QSt
     if (activeId_ == activeId)
         return;
     activeId_ = activeId;
+    syncChatBackground();
     actionTarget_.clear();
     hasMessageSnapshot_ = false;
     hasDeferredMessages_ = false;
@@ -1561,6 +1581,7 @@ void ChatView::setMessages(const QVector<ChatMessage>& messages, bool opening) {
     hasDeferredMessages_ = false;
     deferredMessages_.clear();
     if (opening) {
+        syncChatBackground();
         actionTarget_.clear();
         pendingSentText_.clear();
         unreadMarker_.reset();

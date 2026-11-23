@@ -39,7 +39,7 @@ add_custom_command(
 )
 
 set(moc_sources)
-foreach(class IN ITEMS client window chat_features node_map radio_settings native_wlan link_preview)
+foreach(class IN ITEMS client window chat_features node_map radio_settings native_wlan link_preview network_filters network_node_card network_node_management)
   set(header "${CMAKE_CURRENT_SOURCE_DIR}/src/${class}.hpp")
   set(moc_source "${CMAKE_CURRENT_BINARY_DIR}/moc_${class}.cpp")
   add_custom_command(
@@ -60,6 +60,10 @@ symbian_add_executable(ommesh_belle SOURCES
   src/chat_features.cpp
   src/link_preview.cpp
   src/node_map.cpp
+  src/network_filters.cpp
+  src/network_node_card.cpp
+  src/network_node_management.cpp
+  src/node_chat_options.cpp
   src/radio_console.cpp
   src/radio_settings.cpp
   src/native_vibration.cpp

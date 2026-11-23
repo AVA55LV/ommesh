@@ -12,7 +12,8 @@ namespace SettingsIcons {
 enum Kind {
     Search, Node, Name, Frequency, Readings, Contacts, Privacy, Advanced,
     Notifications, Messages, Attachments, Backup, Appearance, Connection,
-    Air, Log, Power, About, Chevron, Back, Gear, Map, Channel, Reconnect, Wlan
+    Air, Log, Power, About, Chevron, Back, Gear, Map, Channel, Reconnect, Wlan,
+    Copy, Lock, More, Terminal, RouteCheck, Sound, Close, Check, Chat
 };
 
 inline void draw(QPainter& painter, Kind kind, const QRect& bounds, const QColor& color) {
@@ -28,6 +29,80 @@ inline void draw(QPainter& painter, Kind kind, const QRect& bounds, const QColor
     case Search:
         painter.drawEllipse(QRectF(4, 4, 12, 12));
         painter.drawLine(QPointF(14.4, 14.4), QPointF(20, 20));
+        break;
+    case Copy:
+        painter.drawRoundedRect(QRectF(8, 8, 12, 12), 1.8, 1.8);
+        outline.moveTo(5, 16);
+        outline.lineTo(4, 16);
+        outline.lineTo(4, 4);
+        outline.lineTo(16, 4);
+        outline.lineTo(16, 5);
+        break;
+    case Lock:
+        painter.drawRoundedRect(QRectF(5, 10, 14, 11), 2, 2);
+        outline.moveTo(8, 10);
+        outline.lineTo(8, 7);
+        outline.cubicTo(8, 2, 16, 2, 16, 7);
+        outline.lineTo(16, 10);
+        break;
+    case More:
+        painter.drawPoint(QPointF(5, 12));
+        painter.drawPoint(QPointF(12, 12));
+        painter.drawPoint(QPointF(19, 12));
+        break;
+    case Terminal:
+        painter.drawRoundedRect(QRectF(3, 5, 18, 14), 2, 2);
+        outline.moveTo(7, 9);
+        outline.lineTo(10, 12);
+        outline.lineTo(7, 15);
+        painter.drawLine(QPointF(13, 15), QPointF(17, 15));
+        break;
+    case RouteCheck:
+        outline.moveTo(4, 8);
+        outline.lineTo(19, 8);
+        outline.moveTo(15, 4);
+        outline.lineTo(19, 8);
+        outline.lineTo(15, 12);
+        outline.moveTo(20, 16);
+        outline.lineTo(5, 16);
+        outline.moveTo(9, 12);
+        outline.lineTo(5, 16);
+        outline.lineTo(9, 20);
+        break;
+    case Sound:
+        outline.moveTo(4, 9);
+        outline.lineTo(8, 9);
+        outline.lineTo(13, 5);
+        outline.lineTo(13, 19);
+        outline.lineTo(8, 15);
+        outline.lineTo(4, 15);
+        outline.closeSubpath();
+        painter.drawArc(QRectF(8, 7, 11, 10), -53 * 16, 106 * 16);
+        painter.drawArc(QRectF(5, 4, 18, 16), -49 * 16, 98 * 16);
+        break;
+    case Close:
+        painter.drawLine(QPointF(6, 6), QPointF(18, 18));
+        painter.drawLine(QPointF(6, 18), QPointF(18, 6));
+        break;
+    case Check:
+        outline.moveTo(5, 12);
+        outline.lineTo(10, 17);
+        outline.lineTo(19, 7);
+        break;
+    case Chat:
+        outline.moveTo(4, 19);
+        outline.lineTo(4, 7);
+        outline.quadTo(4, 4, 8, 4);
+        outline.lineTo(17, 4);
+        outline.quadTo(21, 4, 21, 8);
+        outline.lineTo(21, 13);
+        outline.quadTo(21, 17, 17, 17);
+        outline.lineTo(9, 17);
+        outline.lineTo(4, 20);
+        outline.closeSubpath();
+        painter.drawPoint(QPointF(9, 11));
+        painter.drawPoint(QPointF(13, 11));
+        painter.drawPoint(QPointF(17, 11));
         break;
     case Node:
     case Frequency:

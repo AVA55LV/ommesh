@@ -8,10 +8,17 @@ namespace {
 
 constexpr std::uint8_t SendText = 0x02;
 constexpr std::uint8_t SendLogin = 0x1a;
+constexpr std::uint8_t SendLogout = 29;
+constexpr std::uint8_t SendTrace = 36;
+constexpr std::uint8_t SendTelemetryRequest = 39;
+constexpr std::uint8_t SendBinaryRequest = 50;
 constexpr std::uint8_t RunCli = 0x42;
 constexpr std::uint8_t CliReply = 0x1d;
 constexpr std::uint8_t LoginSuccess = 0x85;
 constexpr std::uint8_t LoginFail = 0x86;
+constexpr std::uint8_t TraceReply = 0x89;
+constexpr std::uint8_t TelemetryReply = 0x8b;
+constexpr std::uint8_t BinaryReply = 0x8c;
 constexpr std::uint8_t CliData = 1;
 
 constexpr std::size_t PrefixSize = 6;
@@ -19,7 +26,8 @@ constexpr std::size_t TagSize = 3;
 constexpr std::size_t PasswordLimit = 15;
 constexpr std::size_t LocalLimit = MaxFrameSize - 1 - TagSize;
 constexpr std::size_t RemoteLimit = 160 - TagSize;
-constexpr std::size_t MaximumAdministrators = 32;
+constexpr std::size_t MaximumSessions = 32;
+constexpr std::size_t MaximumEarlyReplies = 4;
 constexpr std::int64_t RadioCommandInterval = 1500;
 constexpr std::string_view Hex = "0123456789abcdef";
 
@@ -46,6 +54,20 @@ void wipe(Bytes& bytes) {
     }
 }
 
+bool binaryOperation(int operation) {
+    return operation == RadioConsole::Neighbours || operation == RadioConsole::Access;
+}
+
+std::uint32_t littleU32(std::span<const std::uint8_t> frame, std::size_t at) {
+    return std::uint32_t(frame[at]) | (std::uint32_t(frame[at + 1]) << 8) |
+           (std::uint32_t(frame[at + 2]) << 16) | (std::uint32_t(frame[at + 3]) << 24);
+}
+
+void appendU32(Bytes& bytes, std::uint32_t value) {
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
 }
 
 RadioConsole::RadioConsole(Link link)
@@ -55,15 +77,27 @@ bool RadioConsole::busy() const {
     return pending_.has_value();
 }
 
+bool RadioConsole::canStart(int operation) const {
+    return !busy() && (operation == Local || operation == ResetRoute || operation == Logout ||
+                      link_.now() >= nextRadioCommand_);
+}
+
+bool RadioConsole::signedIn(const Key& key) const {
+    return std::any_of(sessions_.begin(), sessions_.end(), [&](const Session& session) {
+        return session.key == key;
+    });
+}
+
 bool RadioConsole::authorized(const Key& key) const {
-    return std::find(administrators_.begin(), administrators_.end(), key) != administrators_.end();
+    return std::any_of(sessions_.begin(), sessions_.end(), [&](const Session& session) {
+        return session.key == key && session.administrator;
+    });
 }
 
 void RadioConsole::forgetAuthorization(const Key& key) {
-    const auto previous = std::find(administrators_.begin(), administrators_.end(), key);
-    if (previous != administrators_.end()) {
-        administrators_.erase(previous);
-    }
+    sessions_.erase(std::remove_if(sessions_.begin(), sessions_.end(), [&](const Session& session) {
+        return session.key == key;
+    }), sessions_.end());
 }
 
 void RadioConsole::start(int requestId, int operation, const Key* key, std::string_view input) {
@@ -93,7 +127,11 @@ void RadioConsole::start(int requestId, int operation, const Key* key, std::stri
             fail("Введите команду");
             return;
         }
-        input = input.substr(first, input.find_last_not_of(spacing) + 1 - first);
+        // These remote commands distinguish an empty argument from no argument.
+        const bool explicitEmptyArgument = operation == Remote &&
+            (input == "neighbor.remove " || input == "set owner.info " || input == "set guest.password ");
+        if (!explicitEmptyArgument)
+            input = input.substr(first, input.find_last_not_of(spacing) + 1 - first);
     }
     if (operation == Remote && input.size() < 2) {
         fail("Команда слишком короткая");
@@ -149,6 +187,90 @@ void RadioConsole::start(int requestId, int operation, const Key* key, std::stri
         frame.insert(frame.end(), pending_->tag.begin(), pending_->tag.end());
     }
     frame.insert(frame.end(), input.begin(), input.end());
+    sendPending(std::move(frame));
+}
+
+void RadioConsole::startManagement(int requestId, int operation, const Key& key, int order, int offset,
+                                   std::span<const std::uint8_t> tracePath, std::uint8_t traceFlags) {
+    const auto fail = [&](const std::string& text) {
+        if (link_.managementResult)
+            link_.managementResult(requestId, operation, false, {}, text);
+    };
+    if (!canStart(operation)) {
+        fail("Подождите перед следующим запросом к узлу");
+        return;
+    }
+    Bytes frame;
+    Request request{requestId, operation, key, {}};
+    if (operation == ResetRoute) {
+        frame = resetPath(key);
+    } else if (operation == Logout) {
+        frame = {SendLogout};
+        frame.insert(frame.end(), key.begin(), key.end());
+    } else if (operation == Telemetry) {
+        frame = {SendTelemetryRequest, 0, 0, 0};
+        frame.insert(frame.end(), key.begin(), key.end());
+        nextRadioCommand_ = link_.now() + RadioCommandInterval;
+    } else if (operation == Trace) {
+        if (traceFlags > 2 || tracePath.empty() || (tracePath.size() & ((1u << traceFlags) - 1)) != 0 ||
+            13 + tracePath.size() + (tracePath.size() >> traceFlags) > MaxFrameSize ||
+            (tracePath.size() >> traceFlags) > 64) {
+            fail("Маршрут слишком длинный для проверки");
+            return;
+        }
+        const std::int64_t now = link_.now();
+        if (!nextTraceTag_)
+            nextTraceTag_ = link_.unixSeconds() ^ static_cast<std::uint32_t>(now);
+        request.traceTag = nextTraceTag_++;
+        request.traceFlags = traceFlags;
+        request.tracePath.assign(tracePath.begin(), tracePath.end());
+        request.started = now;
+        frame = {SendTrace};
+        appendU32(frame, request.traceTag);
+        appendU32(frame, 0);
+        frame.push_back(traceFlags);
+        frame.insert(frame.end(), tracePath.begin(), tracePath.end());
+        nextRadioCommand_ = now + RadioCommandInterval;
+    } else if (binaryOperation(operation)) {
+        if (operation == Neighbours && !signedIn(key)) {
+            fail("Войдите на узел, чтобы прочитать соседей");
+            return;
+        }
+        if (operation == Access && !authorized(key)) {
+            fail("Войдите как администратор узла");
+            return;
+        }
+        frame = {SendBinaryRequest};
+        frame.insert(frame.end(), key.begin(), key.end());
+        switch (operation) {
+        case Neighbours: {
+            if (order < 0 || order > 3 || offset < 0 || offset > 65535) {
+                fail("Неверная страница соседей");
+                return;
+            }
+            frame.insert(frame.end(), {0x06, 0, 10, static_cast<std::uint8_t>(offset),
+                         static_cast<std::uint8_t>(offset >> 8), static_cast<std::uint8_t>(order), PrefixSize});
+            // Vary otherwise identical queries so the mesh does not treat them as duplicates.
+            const std::uint32_t nonce = link_.unixSeconds() ^ static_cast<std::uint32_t>(link_.now());
+            appendU32(frame, nonce);
+            break;
+        }
+        case Access:
+            frame.insert(frame.end(), {0x05, 0, 0});
+            break;
+        }
+        nextRadioCommand_ = link_.now() + RadioCommandInterval;
+    } else {
+        fail("Неизвестный запрос к узлу");
+        return;
+    }
+    pending_ = std::move(request);
+    sendPending(std::move(frame));
+}
+
+void RadioConsole::sendPending(Bytes frame) {
+    const int requestId = pending_->id;
+    const int operation = pending_->operation;
     const bool sent = link_.send(frame);
     wipe(frame);
     if (!sent && pending_ && pending_->id == requestId && pending_->operation == operation) {
@@ -161,6 +283,18 @@ bool RadioConsole::accept(std::span<const std::uint8_t> frame) {
         return false;
     }
     if (pending_->remoteDeadline == 0 && acceptCommandReply(frame)) {
+        return true;
+    }
+    if (binaryOperation(pending_->operation) && frame.front() == BinaryReply && frame.size() >= 6) {
+        if (!pending_->binaryTag) {
+            if (pending_->earlyBinary.size() == MaximumEarlyReplies)
+                pending_->earlyBinary.erase(pending_->earlyBinary.begin());
+            pending_->earlyBinary.emplace_back(frame.begin(), frame.end());
+        } else if (*pending_->binaryTag == littleU32(frame, 2)) {
+            finish({true, {}, Bytes(frame.begin() + 6, frame.end())});
+        } else {
+            return false;
+        }
         return true;
     }
     auto result = overTheAirReply(frame);
@@ -182,12 +316,21 @@ bool RadioConsole::acceptCommandReply(std::span<const std::uint8_t> frame) {
     Request& request = *pending_;
     const bool local = request.operation == Local;
     const std::uint8_t code = frame.front();
-    if (code != response::Error && code != (local ? CliReply : response::Sent)) {
+    const bool localManagement = request.operation == ResetRoute || request.operation == Logout;
+    const bool success = code == (local ? CliReply : localManagement ? response::Ok : response::Sent);
+    if (code != response::Error && code != 0x0f && !success) {
         return false;
     }
     link_.released();
+    if (localManagement) {
+        if (request.operation == ResetRoute)
+            finish({success, success ? "Маршрут сброшен" : "Рация не сбросила маршрут"});
+        else
+            finish({success, success ? "Сеанс завершён" : "Рация не завершила сеанс"});
+        return true;
+    }
     if (local) {
-        if (code == response::Error) {
+        if (!success) {
             const bool unsupported = frame.size() == 1 || frame[1] == 1;
             finish({false, unsupported ? "Прошивка рации не поддерживает локальную консоль"
                                        : "Рация отклонила команду"});
@@ -206,11 +349,18 @@ bool RadioConsole::acceptCommandReply(std::span<const std::uint8_t> frame) {
         return true;
     }
     if (code != response::Sent || frame.size() < 10) {
-        finish({false, "Рация отклонила запрос к узлу"});
+        const bool unsupported = request.operation >= Neighbours &&
+                                 code == response::Error && (frame.size() == 1 || frame[1] == 1);
+        finish({false, unsupported ? "Прошивка рации не поддерживает этот запрос"
+                                   : "Рация отклонила запрос к узлу"});
         return true;
     }
     if (request.operation == Login && !hasIdentity(frame, 2, request.key, 4)) {
         finish({false, "Получен ответ рации для другого узла"});
+        return true;
+    }
+    if (request.operation == Trace && parseSentTag(frame) != request.traceTag) {
+        finish({false, "Получен ответ рации для другой проверки"});
         return true;
     }
 
@@ -218,7 +368,16 @@ bool RadioConsole::acceptCommandReply(std::span<const std::uint8_t> frame) {
     const std::int64_t minimum = frame[1] == 0 ? 6000 : 12000;
     const std::int64_t wait = std::clamp(estimate * 5 / 4 + 2100, minimum, std::int64_t(60000));
     request.remoteDeadline = link_.now() + wait;
-    if (request.early) {
+    if (binaryOperation(request.operation)) {
+        request.binaryTag = parseSentTag(frame);
+        auto early = std::move(request.earlyBinary);
+        for (const auto& reply : early) {
+            if (littleU32(reply, 2) == *request.binaryTag) {
+                finish({true, {}, Bytes(reply.begin() + 6, reply.end())});
+                break;
+            }
+        }
+    } else if (request.early) {
         finish(std::move(*request.early));
     }
     return true;
@@ -236,10 +395,26 @@ std::optional<RadioConsole::Result> RadioConsole::overTheAirReply(
         if (code == LoginFail) {
             return Result{false, "Узел отклонил вход"};
         }
-        if (frame[1] != 1) {
-            return Result{false, "Узел не подтвердил права администратора"};
-        }
-        return Result{true, "Вход администратора подтверждён"};
+        const bool administrator = frame.size() >= 13 ? (frame[12] & 3) == 3 : frame[1] == 1;
+        return Result{true, administrator ? "Вход администратора подтверждён" : "Вход подтверждён",
+                      {}, administrator};
+    }
+    if (request.operation == Telemetry && code == TelemetryReply &&
+        hasIdentity(frame, 2, request.key, PrefixSize)) {
+        return Result{true, {}, Bytes(frame.begin() + 8, frame.end())};
+    }
+    if (request.operation == Trace && code == TraceReply) {
+        const std::size_t length = request.tracePath.size();
+        const std::size_t samples = (length >> request.traceFlags) + 1;
+        constexpr std::size_t header = 12;
+        if (frame.size() < header + length + samples || frame[2] != length ||
+            frame[3] != request.traceFlags || littleU32(frame, 4) != request.traceTag ||
+            !std::equal(request.tracePath.begin(), request.tracePath.end(), frame.begin() + header))
+            return std::nullopt;
+        Bytes data;
+        appendU32(data, static_cast<std::uint32_t>(std::max<std::int64_t>(0, link_.now() - request.started)));
+        data.insert(data.end(), frame.begin() + header + length, frame.begin() + header + length + samples);
+        return Result{true, {}, std::move(data)};
     }
     if (request.operation != Remote ||
         (code != response::ContactMessage && code != response::ContactMessageV3)) {
@@ -263,7 +438,7 @@ void RadioConsole::tick() {
 }
 
 void RadioConsole::close() {
-    administrators_.clear();
+    sessions_.clear();
     nextRadioCommand_ = 0;
     if (pending_) {
         finish({false, "Соединение закрыто"});
@@ -274,12 +449,19 @@ void RadioConsole::finish(Result result) {
     const Request completed = std::move(*pending_);
     pending_.reset();
     if (completed.operation == Login && result.success) {
-        if (administrators_.size() == MaximumAdministrators) {
-            administrators_.erase(administrators_.begin());
+        if (sessions_.size() == MaximumSessions) {
+            sessions_.erase(sessions_.begin());
         }
-        administrators_.push_back(completed.key);
+        sessions_.push_back({completed.key, result.administrator});
     }
-    link_.result(completed.id, completed.operation, result.success, result.text);
+    if (completed.operation == Logout && result.success)
+        forgetAuthorization(completed.key);
+    if (completed.operation >= Neighbours) {
+        if (link_.managementResult)
+            link_.managementResult(completed.id, completed.operation, result.success, result.data, result.text);
+    } else {
+        link_.result(completed.id, completed.operation, result.success, result.text);
+    }
 }
 
 }

@@ -11,7 +11,7 @@ uid = 0xe78af614
 name = "OMMesh Belle"
 vendor = "OMMesh Belle port"
 executable_name = "ommesh_belle.exe"
-version = [0, 2, 17]
+version = [0, 2, 19]
 
 [application]
 caption = "OMMesh Belle"

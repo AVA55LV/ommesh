@@ -27,6 +27,9 @@ public:
 
     void setTrace(const std::function<void(const char*, int)>& trace);
     void setNodes(const QVector<NetworkNode>& nodes);
+    void setSelfNode(const NetworkNode& node);
+    bool focusNode(const NetworkNode& node);
+    void setExpanded(bool expanded);
     void setSource(Source source);
     void setOfflineRegion(OfflineRegion region);
     static Source sourceFromPreference(int value);
@@ -35,6 +38,7 @@ public:
 signals:
     void nodeSelected(const QString& id);
     void settingsRequested();
+    void expansionRequested();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -47,6 +51,8 @@ protected:
     void keyPressEvent(QKeyEvent* event) override;
 
 private slots:
+    void activateControl(int control);
+    void advanceCamera();
     void loadVisibleTiles();
     void loadVisibleBuildings();
     void readTileData();

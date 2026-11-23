@@ -59,6 +59,8 @@ struct NetworkNode {
     quint32 lastAdvert = 0;
     qint32 latitude = 0;
     qint32 longitude = 0;
+    QString publicKey;
+    bool consoleAuthorized = false;
 };
 
 struct RadioChannel {
@@ -67,10 +69,45 @@ struct RadioChannel {
     QString key;
 };
 
+struct NodeNeighbour {
+    QString prefix;
+    quint32 heardSeconds;
+    int snrQuarterDb;
+};
+
+struct NodeNeighboursPage {
+    int total;
+    QVector<NodeNeighbour> rows;
+};
+
+struct NodeAccessEntry {
+    QString prefix;
+    int permissions;
+};
+
+struct NodeTelemetryReadings {
+    std::optional<int> batteryMillivolts;
+    std::optional<int> temperatureTenthsC;
+};
+
+struct NodeRouteTraceResult {
+    int roundTripMs;
+    QVector<int> snrQuarters;
+};
+
 class Client : public QObject {
     Q_OBJECT
 
 public:
+    enum NodeOperation {
+        NodeNeighbours = meshcore::RadioConsole::Neighbours,
+        NodeAccess = meshcore::RadioConsole::Access,
+        NodeRouteReset = meshcore::RadioConsole::ResetRoute,
+        NodeTelemetry = meshcore::RadioConsole::Telemetry,
+        NodeLogout = meshcore::RadioConsole::Logout,
+        NodeRouteTrace = meshcore::RadioConsole::Trace
+    };
+
     using ConnectionTrace = std::function<void(const char*, int)>;
     static constexpr int TraceWithoutValue = -32768;
     static constexpr int MinimumSendTries = 1;
@@ -105,6 +142,19 @@ public:
     int nextConsoleRequestId();
     bool runConsole(int requestId, const QString& nodeId, const QString& command);
     bool loginConsole(int requestId, const QString& nodeId, const QString& password);
+    bool nodeSignedIn(const QString& nodeId) const;
+    bool nodeConsoleAuthorized(const QString& nodeId) const;
+    bool requestNodeNeighbours(int requestId, const QString& nodeId, int order, int offset = 0);
+    bool requestNodeAccess(int requestId, const QString& nodeId);
+    bool requestNodeRouteReset(int requestId, const QString& nodeId);
+    bool canTraceNodeRoute(const QString& nodeId, bool direct = false) const;
+    bool requestNodeRouteTrace(int requestId, const QString& nodeId, bool direct = false);
+    bool requestNodeTelemetry(int requestId, const QString& nodeId);
+    bool logOutNode(int requestId, const QString& nodeId);
+    static std::optional<NodeNeighboursPage> parseNodeNeighbours(const QByteArray& data);
+    static QVector<NodeAccessEntry> parseNodeAccess(const QByteArray& data);
+    static NodeTelemetryReadings parseNodeTelemetry(const QByteArray& data);
+    static std::optional<NodeRouteTraceResult> parseNodeRouteTrace(const QByteArray& data);
     QVector<RadioChannel> radioChannels() const;
     bool setRadioChannel(int slot, const QString& name, const QString& keyHex);
 
@@ -134,8 +184,9 @@ public:
 signals:
     void changed();
     void incomingMessage();
-    void incomingChatMessage(const QString& id);
+    void incomingChatMessage(const QString& id, const QString& text, bool room);
     void consoleResult(int requestId, int operation, bool success, const QString& text);
+    void nodeManagementResult(int requestId, int operation, bool success, const QByteArray& data, const QString& error);
     void channelResult(int slot, bool success, const QString& message);
 
 private slots:
@@ -186,6 +237,9 @@ private:
         int operation;
         QString nodeId;
         QString input;
+        int order = 0;
+        int offset = 0;
+        bool directTrace = false;
     };
     struct HeardSample {
         meshcore::HeardGroup packet;
@@ -220,7 +274,9 @@ private:
     const meshcore::Channel* channelForIndex(int index) const;
     void assignPublicAliases();
     void finishChannelChange(bool success, const QString& explanation);
-    bool submitConsole(int requestId, int operation, const QString& nodeId, const QString& input);
+    bool submitConsole(int requestId, int operation, const QString& nodeId, const QString& input,
+                       int order = 0, int offset = 0, bool directTrace = false);
+    void finishConsoleRequest(int id, int operation, bool success, const QByteArray& data, const QString& message);
     void startConsole();
     void onRadioLog(const meshcore::Bytes& frame);
     void pruneEchoes(qint64 now);
@@ -306,6 +362,7 @@ private:
     int syncStartCount_ = 0;
     std::size_t radioNameBytes_ = 0;
     int channelCount_ = 0;
+    int pathHashMode_ = 0;
     int channelIndex_ = 0;
     int channelChangeSlot_ = -1;
     meshcore::Bytes channelChangeCommand_;

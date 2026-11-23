@@ -3,10 +3,13 @@
 #include "chat_features.hpp"
 #include "demo_radio.hpp"
 #include "message_text.hpp"
+#include "network_node_card.hpp"
+#include "network_node_management.hpp"
 #include "node_map.hpp"
 #include "radio_settings.hpp"
 #include "settings_icons.hpp"
 
+#include <QtCore/QBasicTimer>
 #include <QtCore/QDateTime>
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QEvent>
@@ -14,6 +17,7 @@
 #include <QtCore/QSet>
 #include <QtCore/QSettings>
 #include <QtCore/QTimer>
+#include <QtCore/QTimerEvent>
 #include <QtGui/QButtonGroup>
 #include <QtGui/QDialog>
 #include <QtGui/QFontMetrics>
@@ -37,6 +41,7 @@
 #include <QtGui/QVBoxLayout>
 
 #include <algorithm>
+#include <functional>
 
 namespace {
 
@@ -99,6 +104,19 @@ QString shortDate(quint32 timestamp) {
     const qint64 days = time.date().daysTo(QDate::currentDate());
     return days == 0 ? time.toString(QLatin1String("HH:mm")) :
            days == 1 ? ui("Вчера") : time.toString(QLatin1String("dd.MM"));
+}
+
+QString heardTime(quint32 timestamp, quint32 now) {
+    if (timestamp == 0)
+        return QString();
+    const quint32 seconds = now > timestamp ? now - timestamp : 0;
+    if (seconds < 60)
+        return ui("только что");
+    if (seconds < 3600)
+        return ui("%1 мин").arg(seconds / 60);
+    if (seconds < 86400)
+        return ui("%1 ч").arg(seconds / 3600);
+    return ui("%1 дн.").arg(seconds / 86400);
 }
 
 QString roleName(int role) {
@@ -210,6 +228,15 @@ void drawPin(QPainter& painter, int x, int y) {
     painter.drawLine(x + 2, y - 5, x + 2, y - 1);
     painter.drawLine(x - 4, y, x + 4, y);
     painter.drawLine(x, y, x, y + 5);
+}
+
+void drawFavorite(QPainter& painter, int x, int y) {
+    const QPoint outline[] = {{0, -6}, {2, -2}, {6, -2}, {3, 1}, {4, 5}, {0, 3},
+                              {-4, 5}, {-3, 1}, {-6, -2}, {-2, -2}};
+    QPolygon marker;
+    for (const QPoint& point : outline)
+        marker << point + QPoint(x, y);
+    painter.drawPolygon(marker);
 }
 
 const char* const chatFilters[] = {"Все чаты", "Непрочитанные", "Каналы", "Личные", "Закреплённые"};
@@ -380,10 +407,13 @@ public:
         titleFont.setPixelSize(17);
         titleFont.setBold(true);
         painter->setFont(titleFont);
-        if (role > 0) {
-            drawNode(*painter, avatar);
-        } else if (role == ChatRoomRole) {
+        if (role == 2) {
+            SettingsIcons::draw(*painter, SettingsIcons::Node,
+                QRect(avatar.x() - 12, avatar.y() - 12, 24, 24), QColor(234, 241, 244));
+        } else if (role == ChatRoomRole || role == 3) {
             drawRoom(*painter, avatar);
+        } else if (role > 3) {
+            drawNode(*painter, avatar);
         } else {
             const QString icon = channel ? QLatin1String("#") :
                     title.isEmpty() || title.at(0).isHighSurrogate() ? ui("·") : title.left(1).toUpper();
@@ -392,13 +422,14 @@ public:
 
         const int left = area.left() + 53;
         const int right = area.right() - 8;
-        const int first = area.top() + 10;
-        const int second = area.top() + 34;
+        const int first = area.top() + (role > 0 ? 6 : 10);
+        const int second = area.top() + (role > 0 ? 28 : 34);
         QFont smallFont = option.font;
         smallFont.setPixelSize(13);
         QFontMetrics smallMetrics(smallFont);
         const QString stamp = index.data(ItemStamp).toString();
-        const int stampWidth = stamp.isEmpty() ? 0 : qMin(60, smallMetrics.width(stamp) + 5);
+        const int stampLimit = role > 0 ? 82 : 60;
+        const int stampWidth = stamp.isEmpty() ? 0 : qMin(stampLimit, smallMetrics.width(stamp) + 5);
         const bool pinned = index.data(ItemPinned).toBool();
         const int titleWidth = qMax(0, right - left - stampWidth - (stampWidth ? 8 : 0) - (pinned ? 16 : 0));
         const QFontMetrics titleMetrics(titleFont);
@@ -408,7 +439,11 @@ public:
                           displayTitle);
         if (pinned) {
             painter->setPen(colors.accent);
-            drawPin(*painter, left + qMin(titleWidth, titleMetrics.width(displayTitle)) + 8, first + 11);
+            const int x = left + qMin(titleWidth, titleMetrics.width(displayTitle)) + 8;
+            if (role > 0)
+                drawFavorite(*painter, x, first + 11);
+            else
+                drawPin(*painter, x, first + 11);
         }
 
         painter->setFont(smallFont);
@@ -436,8 +471,8 @@ public:
         painter->restore();
     }
 
-    QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex&) const override {
-        return QSize(0, 60);
+    QSize sizeHint(const QStyleOptionViewItem&, const QModelIndex& index) const override {
+        return QSize(0, index.data(ItemRole).toInt() > 0 ? 54 : 60);
     }
 
 private:
@@ -521,6 +556,28 @@ QString themeStyle(const Appearance::Palette& colors) {
     QString style = QLatin1String(
         "#window, #dashboard, #pane, #detailPage, #appearanceSwatches, QDialog {"
         " background: @canvas@; color: @text@; }"
+        "#networkPage { background: @canvas@; }"
+        "#networkNodePane, #networkSheet { background: @group@; border: 1px solid @border@;"
+        " border-radius: 12px; }"
+        "#networkSheetGrip { background: @muted@; border-radius: 2px; }"
+        "#networkNodes, #networkSheetScroll, #networkSheetViewport, #networkFilterPanel, #networkNodeCard {"
+        " background: @group@; }"
+        "#networkSheet #settingsGroup { background: @canvas@; }"
+        "#networkNodeCard QLabel#networkNodeTitle { font-size: 20px; font-weight: bold; }"
+        "#networkNodeCard QLabel#networkRowTitle { font-size: 15px; }"
+        "#networkNodeCard QLabel#networkRowValue { color: @muted@; font-size: 13px; }"
+        "#networkNodeCard QPushButton[networkRow=\"true\"] { background: transparent; border: none; padding: 0; }"
+        "#networkNodeCard QPushButton[networkRow=\"true\"]:pressed { background: @selection@; }"
+        "#networkNodeCard QPushButton[networkRow=\"true\"]:focus { border: 1px solid @accent@; }"
+        "#networkNodeCard QPushButton[networkRow=\"true\"]:disabled QLabel#networkRowTitle { color: @muted@; }"
+        "#networkNodeCard QPushButton[networkInfoRow=\"true\"] QLabel#networkRowTitle { color: @text@; }"
+        "#networkNodeCard #networkRowDivider { background: @border@; }"
+        "#networkNodeCard QLabel#networkNodeFeedback { color: @accent@; font-size: 13px; }"
+        "QToolButton#networkFiltersButton { background: @chrome@; border: 1px solid @border@;"
+        " border-radius: 9px; }"
+        "QToolButton#networkFiltersButton:pressed, QToolButton#networkFiltersButton:focus {"
+        " background: @selection@; border-color: @accent@; }"
+        "QLineEdit#networkNodeSearch { font-size: 15px; }"
         "#tabs { background: @chrome@; border-top: 1px solid @border@; }"
         "#nodeCard { background: @nodeCard@; border-radius: 13px; }"
         "#settingsReconnectBanner { background: @chrome@; border: 1px solid @border@; border-radius: 10px; }"
@@ -575,7 +632,7 @@ QString themeStyle(const Appearance::Palette& colors) {
         "QToolButton#tabButton { color: @muted@; border: 0; padding: 4px; font-size: 13px;"
         " background: transparent; }"
         "QToolButton#tabButton:checked { color: @accent@; background: @selection@;"
-        " border-top: 2px solid @accent@; font-weight: bold; }"
+        " font-weight: bold; }"
         "QToolButton#tabButton:focus { color: @text@; }"
         "QSlider#chatTextSize::groove:horizontal { height: 5px; margin: 8px 9px;"
         " background: @border@; border-radius: 2px; }"
@@ -604,6 +661,297 @@ QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content) {
     scroll->setContent(content);
     return scroll;
 }
+
+namespace {
+
+class PanelMotion {
+public:
+    explicit PanelMotion(qreal value) : value_(value) {}
+
+    void moveTo(qreal target, QWidget* owner, int duration) {
+        timer_.stop();
+        from_ = value_;
+        target_ = target;
+        duration_ = duration;
+        if (duration <= 0 || qFuzzyCompare(from_ + 1, target_ + 1)) {
+            value_ = target_;
+            return;
+        }
+        elapsed_.start();
+        timer_.start(30, owner);
+    }
+
+    bool step(QTimerEvent* event) {
+        if (!timer_.isActive() || event->timerId() != timer_.timerId())
+            return false;
+        const qreal t = qMin(qreal(1), qreal(elapsed_.elapsed()) / duration_);
+        const qreal inverse = 1 - t;
+        value_ = from_ + (target_ - from_) * (1 - inverse * inverse * inverse);
+        if (t == 1) {
+            value_ = target_;
+            timer_.stop();
+        }
+        return true;
+    }
+
+    qreal value() const { return value_; }
+    bool inMotion() const { return timer_.isActive(); }
+
+private:
+    QBasicTimer timer_;
+    QElapsedTimer elapsed_;
+    qreal value_;
+    qreal from_ = 0;
+    qreal target_ = 0;
+    int duration_ = 0;
+};
+
+}  // namespace
+
+class AnimatedTabStrip : public QWidget {
+public:
+    explicit AnimatedTabStrip(QWidget* parent) : QWidget(parent), bar_(new QWidget(this)) {
+        setObjectName(QLatin1String("tabs"));
+        setAttribute(Qt::WA_StyledBackground);
+        bar_->setAttribute(Qt::WA_TransparentForMouseEvents);
+        bar_->setAutoFillBackground(true);
+        recolor(Appearance::paletteFor(this).accent);
+    }
+
+    void recolor(const QColor& color) {
+        QPalette palette = bar_->palette();
+        palette.setColor(QPalette::Window, color);
+        bar_->setPalette(palette);
+    }
+
+    void select(int index, bool animate) {
+        motion_.moveTo(index, this, animate ? 150 : 0);
+        placeBar();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent*) override { placeBar(); }
+    void timerEvent(QTimerEvent* event) override {
+        if (motion_.step(event))
+            placeBar();
+    }
+
+private:
+    void placeBar() {
+        const qreal cell = qMax(0, width() - 8) / qreal(3);
+        const int x = 4 + qRound(cell * motion_.value());
+        bar_->setGeometry(x + 2, 0, qMax(0, qRound(cell) - 4), 2);
+        bar_->raise();
+    }
+
+    QWidget* bar_;
+    PanelMotion motion_{0};
+};
+
+class NetworkDashboard : public QWidget {
+public:
+    explicit NetworkDashboard(QWidget* parent) : QWidget(parent) {
+        setObjectName(QLatin1String("networkPage"));
+        setAttribute(Qt::WA_StyledBackground);
+    }
+
+    void setContent(NodeMap* map, QWidget* panel) {
+        map_ = map;
+        panel_ = panel;
+        placeContent();
+    }
+
+    bool expanded() const { return expanded_; }
+
+    void setExpanded(bool expanded) {
+        if (expanded_ == expanded)
+            return;
+        expanded_ = expanded;
+        map_->setExpanded(expanded);
+        motion_.moveTo(expanded ? 1 : 0, this, 180);
+        placeContent();
+    }
+
+protected:
+    void resizeEvent(QResizeEvent*) override { placeContent(); }
+    void timerEvent(QTimerEvent* event) override {
+        if (motion_.step(event))
+            placeContent();
+    }
+
+private:
+    void placeContent() {
+        if (!map_ || !panel_)
+            return;
+        const bool sideBySide = width() > height() && width() >= 480;
+        const int extent = sideBySide ? width() : height();
+        const int minimumMap = sideBySide ? 190 : 156;
+        const int minimumPanel = sideBySide ? 220 : 151;
+        const int panelSize = qMin(qMax(0, extent - minimumMap),
+                                   qMax(minimumPanel, extent * 44 / 100));
+        const int visible = qRound(panelSize * (1 - motion_.value()));
+        panel_->setVisible(visible > 0);
+        if (sideBySide) {
+            map_->setGeometry(0, 0, width() - visible, height());
+            panel_->setGeometry(width() - visible, 0, panelSize, height());
+        } else {
+            map_->setGeometry(0, 0, width(), height() - visible);
+            panel_->setGeometry(0, height() - visible, width(), panelSize);
+        }
+    }
+
+    NodeMap* map_ = nullptr;
+    QWidget* panel_ = nullptr;
+    bool expanded_ = false;
+    PanelMotion motion_{0};
+};
+
+class NetworkSheet : public QWidget {
+public:
+    NetworkSheet(QWidget* owner, QWidget* content, const QString& title,
+                 const std::function<void()>& close)
+        : QWidget(owner), card_(surface(this, "networkSheet")), close_(close) {
+        setObjectName(QLatin1String("networkOverlay"));
+        auto* layout = new QVBoxLayout(card_);
+        layout->setContentsMargins(12, 7, 12, 10);
+        layout->setSpacing(6);
+        QWidget* grip = surface(card_, "networkSheetGrip");
+        grip->setFixedSize(34, 4);
+        grip->setAttribute(Qt::WA_TransparentForMouseEvents);
+        layout->addWidget(grip, 0, Qt::AlignHCenter);
+        auto* heading = new QHBoxLayout;
+        fullHeight_ = title.isEmpty();
+        closeButton_ = button(fullHeight_ ? QString() : ui("Готово"), card_);
+        closeButton_->setObjectName(QLatin1String("networkSheetClose"));
+        if (fullHeight_) {
+            heading->addStretch(1);
+            const Appearance::Palette colors = Appearance::paletteFor(owner);
+            closeButton_->setFixedSize(31, 30);
+            closeButton_->setIcon(SettingsIcons::icon(SettingsIcons::Close, colors.muted, 17));
+            closeButton_->setProperty("accessibleName", ui("Закрыть карточку"));
+            closeButton_->setToolTip(ui("Закрыть карточку"));
+            layout->setSpacing(2);
+        } else {
+            QLabel* caption = label(title, card_, "subtitle");
+            caption->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+            heading->addWidget(caption, 1);
+            closeButton_->setMinimumHeight(38);
+        }
+        heading->addWidget(closeButton_);
+        layout->addLayout(heading);
+        desiredHeight_ = content->sizeHint().height() + 70;
+        QScrollArea* scroll = makeTouchScrollArea(card_, content);
+        scroll->setObjectName(QLatin1String("networkSheetScroll"));
+        scroll->viewport()->setObjectName(QLatin1String("networkSheetViewport"));
+        const Appearance::Palette colors = Appearance::paletteFor(owner);
+        const QColor background = Appearance::mix(colors.canvas, colors.surface, 79);
+        for (QWidget* widget : {scroll->viewport(), content}) {
+            widget->setAttribute(Qt::WA_StyledBackground);
+            QPalette palette = widget->palette();
+            palette.setColor(QPalette::Window, background);
+            palette.setColor(QPalette::Base, background);
+            widget->setPalette(palette);
+            widget->setAutoFillBackground(true);
+        }
+        layout->addWidget(scroll, 1);
+        owner->installEventFilter(this);
+        setGeometry(owner->rect());
+        placeCard();
+        show();
+        raise();
+        motion_.moveTo(1, this, 190);
+    }
+
+    QPushButton* closeButton() const { return closeButton_; }
+
+    void dismiss(bool animate) {
+        if (!animate) {
+            hide();
+            deleteLater();
+            return;
+        }
+        closing_ = true;
+        card_->setEnabled(false);
+        motion_.moveTo(0, this, 150);
+        if (!motion_.inMotion()) {
+            hide();
+            deleteLater();
+        }
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override {
+        if (watched == parentWidget() && event->type() == QEvent::Resize) {
+            setGeometry(parentWidget()->rect());
+            placeCard();
+        }
+        return QWidget::eventFilter(watched, event);
+    }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.fillRect(rect(), QColor(0, 0, 0, qRound(122 * motion_.value())));
+    }
+
+    void timerEvent(QTimerEvent* event) override {
+        if (!motion_.step(event))
+            return;
+        placeCard();
+        if (closing_ && !motion_.inMotion()) {
+            hide();
+            deleteLater();
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        if (closing_ || event->button() != Qt::LeftButton)
+            return;
+        if (!card_->geometry().contains(event->pos())) {
+            close_();
+        } else if (event->y() - card_->y() < 23) {
+            dragStart_ = event->y();
+        }
+        event->accept();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (dragStart_ < 0)
+            return;
+        const int distance = qMax(0, event->y() - dragStart_);
+        motion_.moveTo(qMax(qreal(0), 1 - qreal(distance) / qMax(1, card_->height())), this, 0);
+        placeCard();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        if (dragStart_ < 0)
+            return;
+        const int distance = event->y() - dragStart_;
+        dragStart_ = -1;
+        if (distance > qMin(86, card_->height() / 4))
+            close_();
+        else
+            motion_.moveTo(1, this, 150);
+    }
+
+private:
+    void placeCard() {
+        const int cardWidth = qMax(1, qMin(440, width() - 16));
+        const int heightLimit = height() - 22;
+        const int cardHeight = qMax(1, fullHeight_ ? heightLimit : qMin(qMax(210, desiredHeight_), heightLimit));
+        const int visible = qRound(cardHeight * motion_.value());
+        card_->setGeometry((width() - cardWidth) / 2, height() - visible, cardWidth, cardHeight);
+        update();
+    }
+
+    QWidget* card_;
+    QPushButton* closeButton_ = nullptr;
+    const std::function<void()> close_;
+    PanelMotion motion_{0};
+    int desiredHeight_ = 0;
+    int dragStart_ = -1;
+    bool closing_ = false;
+    bool fullHeight_ = false;
+};
 
 void ClientWindow::applyAppearance(int theme, int chatTextSize) {
     const Appearance::Theme selected = Appearance::checkedTheme(theme);
@@ -639,6 +987,9 @@ void ClientWindow::applyAppearance(int theme, int chatTextSize) {
             connectionBack_->setIcon(SettingsIcons::icon(SettingsIcons::Back, colors.muted));
         if (detailBack_)
             detailBack_->setIcon(SettingsIcons::icon(SettingsIcons::Back, colors.muted));
+        if (tabStrip_)
+            tabStrip_->recolor(colors.accent);
+        updateNetworkFilterIcon();
         if (tabs_) {
             for (int index = Chats; index <= Settings; ++index)
                 tabs_->button(index)->setIcon(tabIcon(colors, index, index == Chats ? unreadBadge_ : 0,
@@ -672,6 +1023,9 @@ ClientWindow::ClientWindow(Client& client, QWidget* parent)
     host_->setText(preferences.value(QLatin1String("connection/host")).toString());
     port_->setText(preferences.value(QLatin1String("connection/port"), 5000).toString());
     pins_ = preferences.value(QLatin1String("chats/pins")).toMap();
+    favoriteNodes_ = QSet<QString>::fromList(preferences.value(QLatin1String("network/favorites")).toStringList());
+    networkFilters_ = NetworkFilters::load();
+    updateNetworkFilterIcon();
 
     connect(&client_, SIGNAL(changed()), this, SLOT(scheduleViewUpdate()));
     updateView();
@@ -690,7 +1044,8 @@ QWidget* ClientWindow::makeDashboard() {
 }
 
 QWidget* ClientWindow::makeTabs() {
-    QWidget* strip = surface(this, "tabs");
+    tabStrip_ = new AnimatedTabStrip(this);
+    QWidget* strip = tabStrip_;
     QHBoxLayout* layout = new QHBoxLayout(strip);
     layout->setContentsMargins(4, 0, 4, 2);
     layout->setSpacing(2);
@@ -716,6 +1071,7 @@ QWidget* ClientWindow::makeTabs() {
             chatsTab_ = tab;
     }
     connect(tabs_, SIGNAL(buttonClicked(int)), this, SLOT(selectTab(int)));
+    tabStrip_->select(Chats, false);
     return strip;
 }
 
@@ -785,44 +1141,48 @@ QWidget* ClientWindow::makeChatsPage() {
 }
 
 QWidget* ClientWindow::makeNetworkPage() {
-    QWidget* page = surface(tabPages_, "pane");
-    QVBoxLayout* layout = pageLayout(page);
-    layout->setContentsMargins(14, 12, 14, 0);
-    QHBoxLayout* heading = new QHBoxLayout;
-    heading->addWidget(label(ui("Сеть"), page, "heading"), 1);
-    mapButton_ = button(ui("Карта"), page);
-    heading->addWidget(mapButton_);
-    layout->addLayout(heading);
-    nodeSearch_ = searchBox(ui("Найти узел"), page);
-    layout->addWidget(nodeSearch_);
-
-    networkViews_ = new QStackedWidget(page);
-    QWidget* listPage = surface(networkViews_, "pane");
+    networkPage_ = new NetworkDashboard(tabPages_);
+    map_ = new NodeMap(networkPage_);
+    map_->setObjectName(QLatin1String("networkMap"));
+    map_->setTrace([this](const char* step, int code) { client_.traceConnection(step, code); });
+    QWidget* listPage = surface(networkPage_, "networkNodePane");
     QVBoxLayout* listLayout = new QVBoxLayout(listPage);
-    listLayout->setContentsMargins(0, 0, 0, 0);
-    listLayout->setSpacing(8);
+    listLayout->setContentsMargins(10, 8, 10, 0);
+    listLayout->setSpacing(4);
+    QHBoxLayout* searchRow = new QHBoxLayout;
+    searchRow->setSpacing(6);
+    nodeSearch_ = searchBox(ui("Найти узел"), listPage);
+    nodeSearch_->setObjectName(QLatin1String("networkNodeSearch"));
+    nodeSearch_->setMinimumHeight(40);
+    searchRow->addWidget(nodeSearch_, 1);
+    nodeFiltersButton_ = new QToolButton(listPage);
+    nodeFiltersButton_->setObjectName(QLatin1String("networkFiltersButton"));
+    nodeFiltersButton_->setFixedSize(44, 40);
+    nodeFiltersButton_->setIconSize(QSize(24, 24));
+    nodeFiltersButton_->setProperty("accessibleName", ui("Фильтры и порядок узлов"));
+    nodeFiltersButton_->setToolTip(ui("Фильтры и порядок узлов"));
+    searchRow->addWidget(nodeFiltersButton_);
+    listLayout->addLayout(searchRow);
     nodeCount_ = label(QString(), listPage, "muted");
+    nodeCount_->setContentsMargins(4, 0, 0, 0);
     listLayout->addWidget(nodeCount_);
     emptyNodes_ = label(QString(), listPage, "muted");
     emptyNodes_->setWordWrap(true);
     emptyNodes_->setAlignment(Qt::AlignCenter);
     listLayout->addWidget(emptyNodes_);
     nodes_ = makeList(listPage, ui("Узлы"));
+    nodes_->setObjectName(QLatin1String("networkNodes"));
     listLayout->addWidget(nodes_, 1);
-    networkViews_->addWidget(listPage);
+    networkPage_->setContent(map_, listPage);
 
-    map_ = new NodeMap(networkViews_);
-    map_->setTrace([this](const char* step, int code) { client_.traceConnection(step, code); });
-    networkViews_->addWidget(map_);
-    layout->addWidget(networkViews_, 1);
-
-    connect(mapButton_, SIGNAL(clicked()), this, SLOT(showMap()));
+    connect(map_, SIGNAL(expansionRequested()), this, SLOT(showMap()));
+    connect(nodeFiltersButton_, SIGNAL(clicked()), this, SLOT(openNetworkFilters()), Qt::QueuedConnection);
     connect(nodeSearch_, SIGNAL(textChanged(QString)), this, SLOT(filterNodes()));
     connect(nodes_, SIGNAL(itemClicked(QListWidgetItem*)), this, SLOT(openNode(QListWidgetItem*)));
     connect(nodes_, SIGNAL(itemActivated(QListWidgetItem*)), this, SLOT(openNode(QListWidgetItem*)));
     connect(map_, SIGNAL(nodeSelected(QString)), this, SLOT(openNode(QString)));
     connect(map_, SIGNAL(settingsRequested()), this, SLOT(openMapSettings()));
-    return page;
+    return networkPage_;
 }
 
 QWidget* ClientWindow::makeSettingsPage() {
@@ -1043,6 +1403,7 @@ void ClientWindow::queueNavigation(Navigation action) {
     if (action != Navigation::Connection && connectionRequest_ == ConnectionRequest::Connect)
         connectionRequest_ = ConnectionRequest::None;
     pendingTargetId_.clear();
+    pendingNodeId_.clear();
     const bool scheduled = pendingNavigation_ != Navigation::None;
     pendingNavigation_ = action;
     if (!scheduled)
@@ -1068,6 +1429,7 @@ void ClientWindow::applyNavigation() {
     client_.traceConnection("ui navigation begin", static_cast<int>(action));
     // Keep focus outside both stacks before they hide the old page.
     focusNavigation(action == Navigation::Tab ? pendingTab_ : tab_);
+    dismissNetworkSheet(false);
     client_.traceConnection("ui navigation focus settled");
     if (action == Navigation::Exit) {
         close();
@@ -1089,17 +1451,14 @@ void ClientWindow::applyNavigation() {
         saveDraft();
     if (action == Navigation::Tab) {
         tab_ = pendingTab_;
-        if (tab_ == Network && mapVisible_)
+        if (tab_ == Network)
             configureNodeMap(map_);
         tabs_->button(tab_)->setChecked(true);
         tabs_->button(Settings)->setIcon(tabIcon(Appearance::paletteFor(this), Settings, 0, tab_ == Settings));
         tabPages_->setCurrentIndex(tab_);
+        tabStrip_->select(tab_, true);
     } else if (action == Navigation::Map) {
-        mapVisible_ = !mapVisible_;
-        if (mapVisible_)
-            configureNodeMap(map_);
-        networkViews_->setCurrentIndex(mapVisible_ ? 1 : 0);
-        mapButton_->setText(mapVisible_ ? ui("Список") : ui("Карта"));
+        networkPage_->setExpanded(!networkPage_->expanded());
     } else if (action == Navigation::MapSaved) {
         configureNodeMap(map_);
         radioSettings_->updateStatus();
@@ -1284,8 +1643,43 @@ void ClientWindow::applyChatFilter(QAction* choice) {
 }
 
 void ClientWindow::filterNodes() {
-    updateView();
+    scheduleViewUpdate();
     nodes_->verticalScrollBar()->setValue(0);
+}
+
+void ClientWindow::updateNetworkFilterIcon() {
+    if (!nodeFiltersButton_)
+        return;
+    const Appearance::Palette colors = Appearance::paletteFor(this);
+    nodeFiltersButton_->setIcon(SettingsIcons::icon(SettingsIcons::Advanced,
+        NetworkFilters::isDefault(networkFilters_) ? colors.muted : colors.accent, 24));
+}
+
+void ClientWindow::openNetworkFilters() {
+    if (tab_ != Network || pages_->currentWidget() != dashboard_ || networkSheet_)
+        return;
+    networkFilterPanel_ = new NetworkFilterPanel(networkFilters_, networkPage_);
+    connect(networkFilterPanel_.data(), SIGNAL(optionsChanged()), this, SLOT(applyNetworkFilters()));
+    connect(networkFilterPanel_.data(), SIGNAL(refreshRequested()), this, SLOT(refreshNetworkNodes()),
+            Qt::QueuedConnection);
+    showNetworkSheet(networkFilterPanel_, ui("Показать и порядок"));
+    showNodes(client_.nodes());
+}
+
+void ClientWindow::applyNetworkFilters() {
+    if (!networkFilterPanel_)
+        return;
+    networkFilters_ = networkFilterPanel_->options();
+    NetworkFilters::save(networkFilters_);
+    updateNetworkFilterIcon();
+    filterNodes();
+}
+
+void ClientWindow::refreshNetworkNodes() {
+    if (client_.connected() && !client_.busy()) {
+        client_.refresh();
+        scheduleViewUpdate();
+    }
 }
 
 void ClientWindow::filterSettings(const QString& text) {
@@ -1335,7 +1729,7 @@ void ClientWindow::openPendingTarget() {
             chatPage_ = new ChatView(pages_);
             chatPage_->setAppearance(Appearance::paletteFor(this), chatTextSize_);
             pages_->addWidget(chatPage_);
-            connect(chatPage_, SIGNAL(backRequested()), this, SLOT(showChats()));
+            connect(chatPage_, SIGNAL(backRequested()), this, SLOT(returnToDashboard()));
             connect(chatPage_, SIGNAL(sendRequested(QString)), this, SLOT(sendMessage(QString)));
             connect(chatPage_, SIGNAL(resendRequested(QString)), this, SLOT(resendMessage(QString)));
             connect(chatPage_, SIGNAL(reactionRequested(ChatMessage,QString)),
@@ -1372,7 +1766,134 @@ void ClientWindow::openNode(QListWidgetItem* item) {
 }
 
 void ClientWindow::openNode(const QString& id) {
-    showNodeTools(client_, id, this);
+    if (id.isEmpty() || tab_ != Network || pages_->currentWidget() != dashboard_ ||
+            pendingNavigation_ != Navigation::None || networkSheet_)
+        return;
+    const bool scheduled = !pendingNodeId_.isEmpty();
+    pendingNodeId_ = id;
+    if (!scheduled)
+        QTimer::singleShot(0, this, SLOT(openPendingNode()));
+}
+
+NetworkNode ClientWindow::findNetworkNode(const QString& id) const {
+    const QVector<NetworkNode> nodes = client_.nodes();
+    const auto it = std::find_if(nodes.constBegin(), nodes.constEnd(), [&id](const NetworkNode& node) {
+        return node.id == id;
+    });
+    if (it != nodes.constEnd())
+        return *it;
+    const NetworkNode self = client_.connected() ? client_.selfNode() : NetworkNode{};
+    return self.id == id ? self : NetworkNode{};
+}
+
+void ClientWindow::openPendingNode() {
+    const QString id = pendingNodeId_;
+    pendingNodeId_.clear();
+    if (id.isEmpty() || tab_ != Network || pages_->currentWidget() != dashboard_ || networkSheet_)
+        return;
+    const NetworkNode node = findNetworkNode(id);
+    if (node.id.isEmpty())
+        return;
+    auto* card = new NetworkNodeCard(client_, node, favoriteNodes_.contains(id), networkPage_);
+    card->setProperty("networkNodeId", id);
+    connect(card, SIGNAL(favoriteChanged(bool)), this, SLOT(setNetworkNodeFavorite(bool)));
+    connect(card, SIGNAL(chatRequested(QString)), this, SLOT(openNetworkChat(QString)), Qt::QueuedConnection);
+    connect(card, SIGNAL(showOnMap(QString)), this, SLOT(centerNetworkNode(QString)), Qt::QueuedConnection);
+    connect(card, SIGNAL(managementRequested(QString,int)), this,
+            SLOT(openNetworkManagement(QString,int)), Qt::QueuedConnection);
+    showNetworkSheet(card, QString());
+}
+
+void ClientWindow::openNetworkManagement(const QString& id, int page) {
+    if (!networkSheet_ || tab_ != Network || pages_->currentWidget() != dashboard_ ||
+            !client_.nodeSignedIn(id))
+        return;
+    using Panel = NetworkNodeManagementPanel;
+    QString title;
+    switch (page) {
+    case Panel::Neighbours: title = ui("Соседи"); break;
+    case Panel::Settings: title = ui("Настройки узла"); break;
+    case Panel::Access: title = ui("Доступ"); break;
+    default: return;
+    }
+    if (page != Panel::Neighbours && !client_.nodeConsoleAuthorized(id))
+        return;
+    const NetworkNode node = findNetworkNode(id);
+    if (node.id.isEmpty())
+        return;
+    dismissNetworkSheet(false);
+    networkParentNodeId_ = id;
+    auto* panel = new Panel(client_, node, static_cast<Panel::Page>(page), networkPage_);
+    connect(panel, SIGNAL(openNode(QString)), this, SLOT(openNetworkNeighbour(QString)), Qt::QueuedConnection);
+    showNetworkSheet(panel, title);
+}
+
+void ClientWindow::openNetworkNeighbour(const QString& id) {
+    if (networkParentNodeId_.isEmpty() || !networkSheet_)
+        return;
+    dismissNetworkSheet(false);
+    openNode(id);
+}
+
+void ClientWindow::showNetworkSheet(QWidget* content, const QString& title) {
+    focusNavigation(Network);
+    networkSheet_ = new NetworkSheet(networkPage_, content, title, [this] { closeNetworkSheet(); });
+    connect(networkSheet_->closeButton(), SIGNAL(clicked()), this, SLOT(closeNetworkSheet()),
+            Qt::QueuedConnection);
+}
+
+void ClientWindow::dismissNetworkSheet(bool animate) {
+    if (!networkSheet_)
+        return;
+    NetworkSheet* sheet = networkSheet_.data();
+    networkSheet_ = nullptr;
+    networkFilterPanel_ = nullptr;
+    networkParentNodeId_.clear();
+    sheet->dismiss(animate);
+}
+
+void ClientWindow::closeNetworkSheet() {
+    if (networkSheet_) {
+        focusNavigation(Network);
+        const QString parentNode = networkParentNodeId_;
+        dismissNetworkSheet(parentNode.isEmpty());
+        if (!parentNode.isEmpty())
+            openNode(parentNode);
+    }
+}
+
+void ClientWindow::setNetworkNodeFavorite(bool favorite) {
+    const QString id = sender()->property("networkNodeId").toString();
+    if (id.isEmpty())
+        return;
+    if (favorite)
+        favoriteNodes_.insert(id);
+    else
+        favoriteNodes_.remove(id);
+    QStringList ids = favoriteNodes_.values();
+    ids.sort();
+    QSettings().setValue(QLatin1String("network/favorites"), ids);
+    scheduleViewUpdate();
+}
+
+void ClientWindow::openNetworkChat(const QString& id) {
+    if (tab_ != Network || pages_->currentWidget() != dashboard_)
+        return;
+    focusNavigation(Network);
+    dismissNetworkSheet(false);
+    pendingTargetId_ = id;
+    openPendingTarget();
+}
+
+void ClientWindow::centerNetworkNode(const QString& id) {
+    if (tab_ != Network || pages_->currentWidget() != dashboard_)
+        return;
+    const NetworkNode node = findNetworkNode(id);
+    if (!NetworkFilters::hasPosition(node))
+        return;
+    closeNetworkSheet();
+    networkPage_->setExpanded(true);
+    map_->focusNode(node);
 }
 
 void ClientWindow::showMap() {
@@ -1679,34 +2200,48 @@ void ClientWindow::showTargets(const QVector<ChatTarget>& targets) {
 
 void ClientWindow::showNodes(const QVector<NetworkNode>& nodes) {
     const QString query = nodeSearch_->text().trimmed();
-    QVector<NetworkNode> visible;
-    for (const NetworkNode& node : nodes) {
-        if (query.isEmpty() || node.title.contains(query, Qt::CaseInsensitive) ||
-                node.id.contains(query, Qt::CaseInsensitive))
-            visible.append(node);
-    }
-    std::stable_sort(visible.begin(), visible.end(), [](const NetworkNode& left, const NetworkNode& right) {
-        return left.lastAdvert > right.lastAdvert;
-    });
-    if (mapVisible_) {
-        map_->setNodes(visible);
-        return;
+    const bool connected = client_.connected();
+    const NetworkNode self = connected ? client_.selfNode() : NetworkNode{};
+    const quint32 now = QDateTime::currentDateTime().toTime_t();
+    const QVector<NetworkNode> visible = NetworkFilters::filter(
+        nodes, self, favoriteNodes_, query, networkFilters_, now);
+    QVector<NetworkNode> plotted = visible;
+    if (networkFilters_.display == NetworkFilters::All && NetworkFilters::hasPosition(self) &&
+            (query.isEmpty() || self.title.contains(query, Qt::CaseInsensitive) ||
+             self.id.contains(query, Qt::CaseInsensitive) ||
+             self.publicKey.contains(query, Qt::CaseInsensitive)) &&
+            std::none_of(plotted.constBegin(), plotted.constEnd(), [&self](const NetworkNode& node) {
+                return self.id == node.id;
+            }))
+        plotted.append(self);
+    map_->setSelfNode(self);
+    map_->setNodes(plotted);
+    if (networkFilterPanel_) {
+        int withoutPosition = 0;
+        for (const NetworkNode& node : nodes)
+            withoutPosition += !NetworkFilters::hasPosition(node);
+        networkFilterPanel_->setContext(NetworkFilters::hasPosition(self), connected && !client_.busy(),
+                                        nodes.size(), withoutPosition);
     }
 
-    nodeCount_->setText(ui("Узлов: %1").arg(visible.size()));
-    emptyNodes_->setText(query.isEmpty() ? ui("Узлы появятся после подключения к рации.") :
-                                          ui("Поиск не нашёл узлов."));
+    nodeCount_->setText(NetworkFilters::countLabel(visible.size()));
+    emptyNodes_->setText(!query.isEmpty() ? ui("Поиск не нашёл узлов.") :
+        !NetworkFilters::isDefault(networkFilters_) ? ui("Нет узлов для выбранного фильтра.") :
+        ui("Узлы появятся после подключения к ноде."));
     emptyNodes_->setVisible(visible.isEmpty());
     QVector<ListRow> rendered;
     rendered.reserve(visible.size());
     for (const NetworkNode& node : visible) {
-        QString detail = roleName(node.role);
+        const bool own = node.id == self.id;
+        QString detail = own ? ui("Моя нода") : roleName(node.role);
+        if (node.consoleAuthorized)
+            detail += ui(" · вход выполнен");
         if (node.path == 0)
             detail += ui(" · напрямую");
         else if (node.path > 0)
             detail += ui(" · переходов: %1").arg(node.path);
-        rendered.append(ListRow{node.id, node.title, detail, shortDate(node.lastAdvert), 0,
-                                false, false, node.role > 0 ? node.role : 5});
+        rendered.append(ListRow{node.id, node.title, detail, heardTime(node.lastAdvert, now), 0,
+                                false, favoriteNodes_.contains(node.id), node.role > 0 ? node.role : 5});
     }
     displayRows(nodes_, rendered);
 }
@@ -1775,10 +2310,12 @@ void ClientWindow::keyPressEvent(QKeyEvent* event) {
     }
 
     if (pages_->currentWidget() == chatPage_)
-        showChats();
+        returnToDashboard();
     else if (pages_->currentWidget() == connectionPage_ || pages_->currentWidget() == detailPage_)
         returnToDashboard();
-    else if (tab_ == Network && mapVisible_)
+    else if (tab_ == Network && networkSheet_)
+        closeNetworkSheet();
+    else if (tab_ == Network && networkPage_->expanded())
         showMap();
     else if (tab_ != Chats)
         showChats();

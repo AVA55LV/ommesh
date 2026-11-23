@@ -238,6 +238,7 @@ std::optional<Contact> parseContact(std::span<const std::uint8_t> payload)
     result.type = payload[33];
     result.name = readText(payload.subspan(100, 32));
     result.path = payload[35];
+    std::copy_n(payload.begin() + 36, result.pathHashes.size(), result.pathHashes.begin());
     result.lastAdvert = readU32(payload, 132);
     result.latitude = static_cast<std::int32_t>(readU32(payload, 136));
     result.longitude = static_cast<std::int32_t>(readU32(payload, 140));

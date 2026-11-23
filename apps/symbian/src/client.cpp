@@ -76,6 +76,19 @@ bool canChat(const meshcore::Contact& contact) {
     return contact.type == 1 || contact.type == 3;
 }
 
+bool hasNodeManagement(const meshcore::Contact& contact) {
+    return contact.type == 2 || contact.type == 3 || contact.type == 4;
+}
+
+bool supportsManagementOperation(const meshcore::Contact& contact, int operation) {
+    if (operation == Client::NodeNeighbours || operation == Client::NodeRouteTrace)
+        return contact.type == 2;
+    if (operation == meshcore::RadioConsole::Login || operation == meshcore::RadioConsole::Remote ||
+        operation == Client::NodeAccess)
+        return hasNodeManagement(contact);
+    return true;
+}
+
 QString channelBlockId(const QString& author) {
     QString name = author.trimmed().toLower();
     if (name.isEmpty())
@@ -138,6 +151,65 @@ QString hashText(const meshcore::Bytes& path, size_t offset, size_t width) {
                                         static_cast<int>(width)).toHex().constData());
 }
 
+quint8 wireByte(const QByteArray& data, int offset) {
+    return static_cast<quint8>(data.constData()[offset]);
+}
+
+quint32 littleEndian(const QByteArray& data, int offset, int size) {
+    quint32 result = 0;
+    for (int i = 0; i < size; ++i)
+        result |= quint32(wireByte(data, offset + i)) << (8 * i);
+    return result;
+}
+
+int telemetryFieldWidth(quint8 kind) {
+    switch (kind) {
+    case 0x00: case 0x01: case 0x66: case 0x68: case 0x78: case 0x8e: return 1;
+    case 0x02: case 0x03: case 0x65: case 0x67: case 0x73: case 0x74: case 0x75:
+    case 0x79: case 0x7d: case 0x80: case 0x84: return 2;
+    case 0x87: return 3;
+    case 0x64: case 0x76: case 0x82: case 0x83: case 0x85: return 4;
+    case 0x71: case 0x86: return 6;
+    case 0x88: return 9;
+    default: return 0;
+    }
+}
+
+struct TracePath {
+    meshcore::Bytes hashes;
+    std::uint8_t flags;
+};
+
+std::optional<TracePath> repeaterTracePath(const meshcore::Contact* node, int hashMode, bool direct) {
+    if (!node || node->type != 2 || (node->path == 0xff && !direct))
+        return std::nullopt;
+    const int storedHops = node->path == 0xff ? 0 : node->path & 63;
+    const int hops = direct ? 0 : storedHops;
+    const int storedWidth = (storedHops ? node->path >> 6 : hashMode) + 1;
+    if (storedWidth < 1 || storedWidth > 4 ||
+        static_cast<std::size_t>(hops * storedWidth) > node->pathHashes.size())
+        return std::nullopt;
+    // Trace flags code hash widths of one, two or four bytes, so use two bytes for a three-byte route.
+    const std::uint8_t flags = storedWidth == 4 ? 2 : storedWidth >= 2 ? 1 : 0;
+    const int width = 1 << flags;
+    const int roundTripHops = 2 * hops + 1;
+    if (roundTripHops > 64 ||
+        static_cast<std::size_t>(13 + roundTripHops * (width + 1)) > meshcore::MaxFrameSize)
+        return std::nullopt;
+    TracePath result{{}, flags};
+    result.hashes.reserve(static_cast<std::size_t>(roundTripHops * width));
+    const auto appendRelay = [&](int index) {
+        const auto start = node->pathHashes.begin() + index * storedWidth;
+        result.hashes.insert(result.hashes.end(), start, start + width);
+    };
+    for (int i = 0; i < hops; ++i)
+        appendRelay(i);
+    result.hashes.insert(result.hashes.end(), node->key.begin(), node->key.begin() + width);
+    for (int i = hops; i > 0; --i)
+        appendRelay(i - 1);
+    return result;
+}
+
 }  // namespace
 
 Client::Client(QObject* parent, ConnectionTrace trace)
@@ -150,10 +222,13 @@ Client::Client(QObject* parent, ConnectionTrace trace)
             }
         },
         [this](int id, int operation, bool success, const std::string& text) {
-            emit consoleResult(id, operation, success, fromWire(text));
+            finishConsoleRequest(id, operation, success, {}, fromWire(text));
         },
         [this] { return clock_.elapsed(); },
         [this] { return nextTimestamp(); },
+        [this](int id, int operation, bool success, const meshcore::Bytes& data, const std::string& text) {
+            finishConsoleRequest(id, operation, success, rawBytes(data), fromWire(text));
+        },
     }) {
     connect(socket_, SIGNAL(connected()), this, SLOT(socketConnected()), Qt::QueuedConnection);
     connect(socket_, SIGNAL(readyRead()), this, SLOT(readSocket()));
@@ -354,8 +429,10 @@ QString Client::radioInfo() const {
 }
 
 NetworkNode Client::selfNode() const {
+    const bool identified = std::any_of(self_.key.begin(), self_.key.end(),
+                                       [](std::uint8_t byte) { return byte != 0; });
     NetworkNode node{directId(meshcore::prefix(self_.key)), radioName_, 1, -1, 0,
-                     self_.latitude, self_.longitude};
+                     self_.latitude, self_.longitude, identified ? radioKey_ : QString()};
     checkPosition(node.latitude, node.longitude);
     return node;
 }
@@ -369,7 +446,9 @@ QVector<NetworkNode> Client::nodes() const {
     for (const auto& contact : contacts_) {
         NetworkNode node{directId(meshcore::prefix(contact.key)), fromWire(contact.name), contact.type,
                          contact.path == 255 ? -1 : contact.path & 63, contact.lastAdvert,
-                         contact.latitude, contact.longitude};
+                         contact.latitude, contact.longitude,
+                         QString::fromLatin1(rawBytes(contact.key).toHex().constData()),
+                         ready_ && hasNodeManagement(contact) && console_.authorized(contact.key)};
         checkPosition(node.latitude, node.longitude);
         if (node.title.isEmpty())
             node.title = targetTitle(node.id);
@@ -935,15 +1014,119 @@ bool Client::loginConsole(int requestId, const QString& nodeId, const QString& p
     return !nodeId.isEmpty() && submitConsole(requestId, meshcore::RadioConsole::Login, nodeId, password);
 }
 
-bool Client::submitConsole(int requestId, int operation, const QString& nodeId, const QString& input) {
+bool Client::nodeSignedIn(const QString& nodeId) const {
+    const auto* contact = ready_ && !closing_ && !nodeId.isEmpty() ? contactForId(nodeId) : nullptr;
+    return contact && console_.signedIn(contact->key);
+}
+
+bool Client::nodeConsoleAuthorized(const QString& nodeId) const {
+    const auto* contact = ready_ && !closing_ && !nodeId.isEmpty() ? contactForId(nodeId) : nullptr;
+    return contact && hasNodeManagement(*contact) && console_.authorized(contact->key);
+}
+
+bool Client::requestNodeNeighbours(int requestId, const QString& nodeId, int order, int offset) {
+    return !nodeId.isEmpty() && order >= 0 && order <= 3 && offset >= 0 && offset <= 65535 &&
+           submitConsole(requestId, NodeNeighbours, nodeId, {}, order, offset);
+}
+
+bool Client::requestNodeAccess(int requestId, const QString& nodeId) {
+    return !nodeId.isEmpty() && submitConsole(requestId, NodeAccess, nodeId, {});
+}
+
+bool Client::requestNodeRouteReset(int requestId, const QString& nodeId) {
+    return !nodeId.isEmpty() && submitConsole(requestId, NodeRouteReset, nodeId, {});
+}
+
+bool Client::canTraceNodeRoute(const QString& nodeId, bool direct) const {
+    return ready_ && !closing_ && repeaterTracePath(contactForId(nodeId), pathHashMode_, direct).has_value();
+}
+
+bool Client::requestNodeRouteTrace(int requestId, const QString& nodeId, bool direct) {
+    return canTraceNodeRoute(nodeId, direct) && submitConsole(requestId, NodeRouteTrace, nodeId, {}, 0, 0, direct);
+}
+
+bool Client::requestNodeTelemetry(int requestId, const QString& nodeId) {
+    return !nodeId.isEmpty() && submitConsole(requestId, NodeTelemetry, nodeId, {});
+}
+
+bool Client::logOutNode(int requestId, const QString& nodeId) {
+    return nodeSignedIn(nodeId) && submitConsole(requestId, NodeLogout, nodeId, {});
+}
+
+std::optional<NodeNeighboursPage> Client::parseNodeNeighbours(const QByteArray& data) {
+    constexpr int rowSize = 11;
+    if (data.size() < 4)
+        return std::nullopt;
+    const int total = static_cast<int>(littleEndian(data, 0, 2));
+    const int count = static_cast<int>(littleEndian(data, 2, 2));
+    if (count > total || count > 10 || count > (data.size() - 4) / rowSize)
+        return std::nullopt;
+    NodeNeighboursPage result{total, {}};
+    result.rows.reserve(count);
+    for (int i = 0; i < count; ++i) {
+        const int at = 4 + i * rowSize;
+        result.rows.append(NodeNeighbour{QString::fromLatin1(data.mid(at, 6).toHex().constData()),
+                                         littleEndian(data, at + 6, 4),
+                                         static_cast<qint8>(wireByte(data, at + 10))});
+    }
+    return result;
+}
+
+QVector<NodeAccessEntry> Client::parseNodeAccess(const QByteArray& data) {
+    QVector<NodeAccessEntry> result;
+    for (int at = 0; at + 7 <= data.size(); at += 7) {
+        const int permissions = wireByte(data, at + 6);
+        if (!permissions) // MeshCore pads the encrypted reply with zero bytes.
+            break;
+        result.append(NodeAccessEntry{QString::fromLatin1(data.mid(at, 6).toHex().constData()), permissions});
+    }
+    return result;
+}
+
+NodeTelemetryReadings Client::parseNodeTelemetry(const QByteArray& data) {
+    NodeTelemetryReadings result;
+    for (int at = 0; at + 2 <= data.size();) {
+        const int channel = wireByte(data, at++);
+        const quint8 kind = wireByte(data, at++);
+        const int width = telemetryFieldWidth(kind);
+        if ((channel == 0 && kind == 0) || width == 0 || width > data.size() - at)
+            break;
+        if (channel == 1 && (kind == 0x67 || kind == 0x74)) {
+            const auto value = static_cast<qint16>((quint16(wireByte(data, at)) << 8) | wireByte(data, at + 1));
+            if (kind == 0x67)
+                result.temperatureTenthsC = value;
+            else
+                result.batteryMillivolts = value * 10;
+        }
+        at += width;
+    }
+    return result;
+}
+
+std::optional<NodeRouteTraceResult> Client::parseNodeRouteTrace(const QByteArray& data) {
+    if (data.size() < 6)
+        return std::nullopt;
+    NodeRouteTraceResult result{static_cast<int>(littleEndian(data, 0, 4)), {}};
+    result.snrQuarters.reserve(data.size() - 4);
+    for (int i = 4; i < data.size(); ++i)
+        result.snrQuarters.append(static_cast<qint8>(wireByte(data, i)));
+    return result;
+}
+
+bool Client::submitConsole(int requestId, int operation, const QString& nodeId, const QString& input,
+                           int order, int offset, bool directTrace) {
     if (!ready_ || closing_ || consoleRequest_ || console_.busy())
         return false;
     if (!nodeId.isEmpty()) {
         const auto contact = contactForId(nodeId);
-        if (!contact || (contact->type != 2 && contact->type != 3))
+        if (!contact || !supportsManagementOperation(*contact, operation))
+            return false;
+        if (operation == NodeNeighbours && !console_.signedIn(contact->key))
+            return false;
+        if (operation == NodeAccess && !console_.authorized(contact->key))
             return false;
     }
-    consoleRequest_ = ConsoleRequest{requestId, operation, nodeId, input};
+    consoleRequest_ = ConsoleRequest{requestId, operation, nodeId, input, order, offset, directTrace};
     proceed();
     return true;
 }
@@ -952,9 +1135,22 @@ void Client::startConsole() {
     ConsoleRequest request = std::move(*consoleRequest_);
     consoleRequest_.reset();
     const auto contact = request.nodeId.isEmpty() ? nullptr : contactForId(request.nodeId);
-    if (!request.nodeId.isEmpty() && (!contact || (contact->type != 2 && contact->type != 3))) {
+    if (!request.nodeId.isEmpty() && (!contact || !supportsManagementOperation(*contact, request.operation))) {
         request.input.fill(QLatin1Char('\0'));
-        emit consoleResult(request.id, request.operation, false, russian("Узел консоли недоступен"));
+        finishConsoleRequest(request.id, request.operation, false, {}, russian("Узел недоступен"));
+        return;
+    }
+    if (request.operation == NodeRouteTrace) {
+        const auto path = repeaterTracePath(contact, pathHashMode_, request.directTrace);
+        if (!path) {
+            finishConsoleRequest(request.id, request.operation, false, {}, russian("Маршрут для проверки недоступен"));
+            return;
+        }
+        console_.startManagement(request.id, request.operation, contact->key, 0, 0, path->hashes, path->flags);
+        return;
+    }
+    if (request.operation >= NodeNeighbours) {
+        console_.startManagement(request.id, request.operation, contact->key, request.order, request.offset);
         return;
     }
     QByteArray input = request.input.toUtf8();
@@ -962,6 +1158,18 @@ void Client::startConsole() {
     console_.start(request.id, request.operation, contact ? &contact->key : nullptr,
                    {input.constData(), static_cast<std::size_t>(input.size())});
     input.fill('\0');
+}
+
+void Client::finishConsoleRequest(int id, int operation, bool success, const QByteArray& data, const QString& message) {
+    if (operation >= NodeNeighbours) {
+        if (operation == NodeRouteReset && success)
+            refreshNeeded_ = true;
+        emit nodeManagementResult(id, operation, success, data, success ? QString() : message);
+    } else {
+        emit consoleResult(id, operation, success, message);
+    }
+    if (operation == meshcore::RadioConsole::Login || operation == NodeLogout)
+        emit changed();
 }
 
 void Client::socketConnected() {
@@ -1147,6 +1355,8 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
         if (const auto count = parseChannelCount(frame)) {
             traceConnection("MeshCore: device query answered");
             channelCount_ = *count;
+            // DeviceInfo appends the path hash mode after the repeat-enabled flag.
+            pathHashMode_ = frame.size() > 81 && frame[81] <= 3 ? frame[81] : 0;
             firmware_ = fromWire(parseFirmware(frame)).trimmed();
             if (firmware_.isEmpty())
                 firmware_ = russian("протокол %1").arg(frame[1]);
@@ -1422,7 +1632,7 @@ void Client::proceed() {
         return;
     if (syncNeeded_) {
         syncQueue();
-    } else if (consoleRequest_) {
+    } else if (consoleRequest_ && console_.canStart(consoleRequest_->operation)) {
         startConsole();
     } else if (!channelChangeCommand_.empty()) {
         auto command = std::move(channelChangeCommand_);
@@ -1771,7 +1981,8 @@ void Client::onMessage(const meshcore::Incoming& message) {
     received.routeDetails = receiveRoute(message, channel);
     addMessage(id, received);
     if (received.unread) {
-        emit incomingChatMessage(id);
+        const auto* contact = message.channel ? nullptr : contactForId(id);
+        emit incomingChatMessage(id, received.text, !signer.isEmpty() || (contact && contact->type == 3));
         emit incomingMessage();
     }
     emit changed();
@@ -1890,7 +2101,7 @@ void Client::finish(const QString& status, bool retryable) {
         const int operation = consoleRequest_->operation;
         consoleRequest_->input.fill(QLatin1Char('\0'));
         consoleRequest_.reset();
-        emit consoleResult(id, operation, false, russian("Соединение закрыто"));
+        finishConsoleRequest(id, operation, false, {}, russian("Соединение закрыто"));
     }
     console_.close();
     finishChannelChange(false, russian("Соединение закрыто, результат изменения канала неизвестен"));

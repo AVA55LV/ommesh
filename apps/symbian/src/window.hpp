@@ -3,13 +3,18 @@
 
 #include "appearance.hpp"
 #include "client.hpp"
+#include "network_filters.hpp"
 
 #include <QtCore/QHash>
 #include <QtCore/QPointer>
+#include <QtCore/QSet>
 #include <QtCore/QVariant>
 #include <QtGui/QWidget>
 
 class ChatView;
+class AnimatedTabStrip;
+class NetworkDashboard;
+class NetworkSheet;
 class NodeMap;
 class RadioSettingsPanel;
 class QAction;
@@ -54,6 +59,16 @@ private slots:
     void chooseChatFilter();
     void applyChatFilter(QAction* choice);
     void filterNodes();
+    void openNetworkFilters();
+    void applyNetworkFilters();
+    void refreshNetworkNodes();
+    void openPendingNode();
+    void closeNetworkSheet();
+    void setNetworkNodeFavorite(bool favorite);
+    void openNetworkChat(const QString& id);
+    void centerNetworkNode(const QString& id);
+    void openNetworkManagement(const QString& id, int page);
+    void openNetworkNeighbour(const QString& id);
     void filterSettings(const QString& text);
     void toggleSettingsSearch(bool open);
     void openTarget(QListWidgetItem* item);
@@ -97,6 +112,10 @@ private:
     void updateChatChooser(const QVector<ChatTarget>& targets);
     void showTargets(const QVector<ChatTarget>& targets);
     void showNodes(const QVector<NetworkNode>& nodes);
+    void updateNetworkFilterIcon();
+    void showNetworkSheet(QWidget* content, const QString& title);
+    void dismissNetworkSheet(bool animate);
+    NetworkNode findNetworkNode(const QString& id) const;
     void showMessages(const QVector<ChatTarget>& targets);
     void saveDraft();
     bool isPinned(const ChatTarget& target) const;
@@ -115,9 +134,12 @@ private:
     QPointer<QWidget> pendingDetail_;
     QButtonGroup* tabs_ = nullptr;
     QToolButton* chatsTab_ = nullptr;
-    QStackedWidget* networkViews_ = nullptr;
+    AnimatedTabStrip* tabStrip_ = nullptr;
+    NetworkDashboard* networkPage_ = nullptr;
+    QPointer<NetworkSheet> networkSheet_;
+    QString networkParentNodeId_;
+    QPointer<NetworkFilterPanel> networkFilterPanel_;
     NodeMap* map_ = nullptr;
-    QPushButton* mapButton_ = nullptr;
     QLabel* status_ = nullptr;
     QLabel* radio_ = nullptr;
     QLabel* radioState_ = nullptr;
@@ -157,22 +179,25 @@ private:
     QPointer<QPushButton> chooserChannels_;
     int chooserKind_ = 0;
     QLineEdit* nodeSearch_ = nullptr;
+    QToolButton* nodeFiltersButton_ = nullptr;
     QLabel* nodeCount_ = nullptr;
     QLabel* emptyNodes_ = nullptr;
     QListWidget* nodes_ = nullptr;
     QString activeId_;
     QString activeTitle_;
     QString pendingTargetId_;
+    QString pendingNodeId_;
     QString pendingDetailTitle_;
     QHash<QString, QString> drafts_;
     QVariantMap pins_;
+    NetworkFilters::Options networkFilters_;
+    QSet<QString> favoriteNodes_;
     int tab_ = Chats;
     int pendingTab_ = Chats;
     int unreadBadge_ = 0;
     int appearanceTheme_ = -1;
     int chatTextSize_ = Appearance::DefaultChatTextSize;
     bool appearanceDark_ = true;
-    bool mapVisible_ = false;
     bool wasConnected_ = false;
     Navigation pendingNavigation_ = Navigation::None;
     ConnectionRequest connectionRequest_ = ConnectionRequest::None;

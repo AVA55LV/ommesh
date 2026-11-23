@@ -1,4 +1,5 @@
 #include "radio_settings.hpp"
+#include "node_chat_options.hpp"
 
 #include "appearance.hpp"
 #include "client.hpp"
@@ -9,7 +10,6 @@
 #include "settings_icons.hpp"
 #include "window.hpp"
 
-#include <QtCore/QDateTime>
 #include <QtCore/QFile>
 #include <QtCore/QSettings>
 #include <QtCore/QVariant>
@@ -31,7 +31,6 @@
 #include <QtGui/QVBoxLayout>
 
 #include <algorithm>
-#include <cmath>
 
 namespace {
 
@@ -322,38 +321,10 @@ void showConsole(Client& client, const QString& id, const QString& title, QWidge
     dialog.exec();
 }
 
-QString nodeType(int type) {
-    switch (type) {
-    case 1: return ui("Собеседник");
-    case 2: return ui("Репитер");
-    case 3: return ui("Комната");
-    case 4: return ui("Датчик");
-    default: return ui("Узел MeshCore");
-    }
-}
-
 bool hasPosition(const NetworkNode& node) {
     return (node.latitude != 0 || node.longitude != 0) &&
            node.latitude >= -90000000 && node.latitude <= 90000000 &&
            node.longitude >= -180000000 && node.longitude <= 180000000;
-}
-
-QString relativePosition(const NetworkNode& self, const NetworkNode& node) {
-    if (!hasPosition(self) || !hasPosition(node))
-        return QString();
-    constexpr double fromMicroDegrees = 3.14159265358979323846 / 180000000.0;
-    const double fromLat = self.latitude * fromMicroDegrees;
-    const double toLat = node.latitude * fromMicroDegrees;
-    const double longitudeDelta = (static_cast<double>(node.longitude) - self.longitude) * fromMicroDegrees;
-    const double north = std::cos(fromLat) * std::sin(toLat) -
-                         std::sin(fromLat) * std::cos(toLat) * std::cos(longitudeDelta);
-    const double east = std::cos(toLat) * std::sin(longitudeDelta);
-    const double dot = std::sin(fromLat) * std::sin(toLat) +
-                       std::cos(fromLat) * std::cos(toLat) * std::cos(longitudeDelta);
-    const double distance = 6371.0 * std::atan2(std::sqrt(north * north + east * east), dot);
-    const double direction = std::atan2(east, north) / (fromMicroDegrees * 1000000);
-    const int degrees = (qRound(direction) + 360) % 360;
-    return ui("%1 км · азимут %2°").arg(distance, 0, 'f', 1).arg(degrees);
 }
 
 }  // namespace
@@ -543,7 +514,8 @@ RadioSettingsPanel::RadioSettingsPanel(Client& client, QWidget* parent)
     client_.setWlanRecovery(preferences.value(QLatin1String("ui/wlanRecovery"), false).toBool());
     vibrateOnMessage_ = preferences.value(QLatin1String("ui/vibration"), false).toBool();
     connect(&client_, SIGNAL(changed()), this, SLOT(updateStatus()), Qt::QueuedConnection);
-    connect(&client_, SIGNAL(incomingChatMessage(QString)), this, SLOT(onIncomingMessage(QString)), Qt::QueuedConnection);
+    connect(&client_, SIGNAL(incomingChatMessage(QString,QString,bool)),
+            this, SLOT(onIncomingMessage(QString,QString,bool)), Qt::QueuedConnection);
     updateStatus();
 }
 
@@ -620,24 +592,23 @@ void RadioSettingsPanel::saveToggle(const char* key, bool enabled, QLabel* feedb
     updateStatus();
 }
 
-void RadioSettingsPanel::onIncomingMessage(const QString& target) {
-    if (!vibrateOnMessage_ || !QApplication::activeWindow()
-        || (lastVibration_.isValid() && lastVibration_.elapsed() < 1200))
+void RadioSettingsPanel::onIncomingMessage(const QString& target, const QString& text, bool room) {
+    if (!QApplication::activeWindow() || (lastNotification_.isValid() && lastNotification_.elapsed() < 1200))
         return;
-    QSettings settings;
-    const char* category = target.startsWith(QLatin1String("c/")) ? "ui/notifyChannels" : "ui/notifyDirect";
-    if (settings.value(QLatin1String("ui/doNotDisturb"), false).toBool()
-        || !settings.value(QLatin1String(category), true).toBool())
+    const QSettings settings;
+    if (!NodeChatOptions::allowsNotification(settings, target, room, text, client_.radioName()))
         return;
-    lastVibration_.start();
-    vibration_->pulse();
+    lastNotification_.start();
+    if (vibrateOnMessage_)
+        vibration_->pulse();
+    NodeChatOptions::playNotification(settings, target);
 }
 
 void RadioSettingsPanel::testVibration() {
     if (!notificationFeedback_)
         return;
     client_.traceConnection("UI: test vibration");
-    lastVibration_.start();
+    lastNotification_.start();
     const int result = vibration_->pulse();
     client_.traceConnection("UI: vibration result", result);
     notificationFeedback_->setText(result == 0 ? ui("Телефон принял запрос на вибрацию.")
@@ -1165,43 +1136,14 @@ void configureNodeMap(NodeMap* map) {
     map->setSource(source);
 }
 
-void showNodeTools(Client& client, const QString& id, QWidget* parent) {
-    const auto nodes = client.nodes();
-    const auto it = std::find_if(nodes.constBegin(), nodes.constEnd(), [&id](const NetworkNode& node) { return node.id == id; });
-    if (it == nodes.constEnd())
-        return;
-    const NetworkNode node = *it;
-    QDialog dialog(parent);
-    dialog.setWindowTitle(node.title);
-    dialog.resize(334, 320);
-    auto* layout = new QVBoxLayout(&dialog);
-    addText(layout, node.title, &dialog)->setObjectName(QLatin1String("heading"));
-    addText(layout, nodeType(node.role), &dialog);
-    if (node.path >= 0)
-        addText(layout, node.path == 0 ? ui("Прямой маршрут") : ui("Переходов: %1").arg(node.path), &dialog);
-    if (node.lastAdvert != 0)
-        addText(layout, ui("Последний анонс %1").arg(QDateTime::fromTime_t(node.lastAdvert).toString(QLatin1String("dd.MM hh:mm"))), &dialog);
-    if (hasPosition(node)) {
-        addText(layout, ui("%1, %2").arg(node.latitude / 1000000.0, 0, 'f', 5)
-                                  .arg(node.longitude / 1000000.0, 0, 'f', 5), &dialog);
-        const QString distance = relativePosition(client.selfNode(), node);
-        if (!distance.isEmpty())
-            addText(layout, distance, &dialog);
-    }
-    layout->addStretch(1);
-    if (node.role == 2 || node.role == 3)
-        QObject::connect(addSettingsButton(layout, ui("Консоль узла"), &dialog), SIGNAL(clicked()), &dialog, SLOT(accept()));
-    connectCancel(addSettingsButton(layout, ui("Назад"), &dialog), &dialog);
-    if (dialog.exec() == QDialog::Accepted)
-        showConsole(client, id, ui("Консоль · %1").arg(node.title), parent);
-}
-
-RadioConsoleDialog::RadioConsoleDialog(Client& client, const QString& nodeId, const QString& title, QWidget* parent)
-    : QDialog(parent), client_(client), nodeId_(nodeId) {
+RadioConsoleDialog::RadioConsoleDialog(Client& client, const QString& nodeId, const QString& title, QWidget* parent,
+                                       bool loginOnly)
+    : QDialog(parent), client_(client), nodeId_(nodeId), loginOnly_(loginOnly) {
     setWindowTitle(title);
-    resize(338, 425);
+    resize(338, loginOnly_ ? 170 : 425);
     auto* layout = new QVBoxLayout(this);
-    state_ = addText(layout, nodeId_.isEmpty() ? ui("Команды подключённой рации") : ui("Войдите как администратор узла."), this);
+    state_ = addText(layout, loginOnly_ ? ui("Введите пароль узла.") : nodeId_.isEmpty()
+        ? ui("Команды подключённой рации") : ui("Войдите как администратор узла."), this);
     auto* signIn = new QHBoxLayout;
     password_ = new QLineEdit(this);
     password_->setObjectName(QLatin1String("nodePassword"));
@@ -1211,28 +1153,35 @@ RadioConsoleDialog::RadioConsoleDialog(Client& client, const QString& nodeId, co
     signIn->addWidget(password_, 1);
     login_ = addSettingsButton(signIn, ui("Войти"), this, "consoleLogin");
     layout->addLayout(signIn);
-    output_ = new QTextEdit(this);
-    output_->setObjectName(QLatin1String("consoleOutput"));
-    output_->setReadOnly(true);
-    layout->addWidget(output_, 1);
-    command_ = new QLineEdit(this);
-    command_->setObjectName(QLatin1String("consoleCommand"));
-    command_->setPlaceholderText(ui("Команда"));
-    command_->setMaxLength(172);
-    command_->setMinimumHeight(40);
-    command_->setInputMethodHints(Qt::ImhNoAutoUppercase | Qt::ImhNoPredictiveText);
-    layout->addWidget(command_);
+    if (!loginOnly_) {
+        output_ = new QTextEdit(this);
+        output_->setObjectName(QLatin1String("consoleOutput"));
+        output_->setReadOnly(true);
+        layout->addWidget(output_, 1);
+        command_ = new QLineEdit(this);
+        command_->setObjectName(QLatin1String("consoleCommand"));
+        command_->setPlaceholderText(ui("Команда"));
+        command_->setMaxLength(172);
+        command_->setMinimumHeight(40);
+        command_->setInputMethodHints(Qt::ImhNoAutoUppercase | Qt::ImhNoPredictiveText);
+        layout->addWidget(command_);
+    }
     auto* commands = new QHBoxLayout;
     connectCancel(addSettingsButton(commands, ui("Назад"), this), this);
-    send_ = addSettingsButton(commands, ui("Отправить"), this, "consoleSend");
+    if (!loginOnly_) {
+        send_ = addSettingsButton(commands, ui("Отправить"), this, "consoleSend");
+        connect(send_, SIGNAL(clicked()), this, SLOT(submit()));
+        connect(command_, SIGNAL(returnPressed()), this, SLOT(submit()));
+    }
     layout->addLayout(commands);
     connect(login_, SIGNAL(clicked()), this, SLOT(login()));
     connect(password_, SIGNAL(returnPressed()), this, SLOT(login()));
-    connect(send_, SIGNAL(clicked()), this, SLOT(submit()));
-    connect(command_, SIGNAL(returnPressed()), this, SLOT(submit()));
     connect(&client_, SIGNAL(changed()), this, SLOT(readyChanged()));
     connect(&client_, SIGNAL(consoleResult(int,int,bool,QString)), this, SLOT(result(int,int,bool,QString)));
     connected_ = client_.connected();
+    authorized_ = client_.nodeConsoleAuthorized(nodeId_);
+    if (authorized_ && !loginOnly_)
+        state_->setText(ui("Вход выполнен."));
     updateControls();
 }
 
@@ -1250,33 +1199,35 @@ void RadioConsoleDialog::readyChanged() {
 }
 
 void RadioConsoleDialog::updateControls() {
-    const bool requiresLogin = !nodeId_.isEmpty() && !authorized_;
+    const bool requiresLogin = !nodeId_.isEmpty() && (loginOnly_ || !authorized_);
     password_->setVisible(requiresLogin);
     login_->setVisible(requiresLogin);
     password_->setEnabled(connected_ && request_ == 0);
     login_->setEnabled(connected_ && request_ == 0);
-    command_->setEnabled(connected_ && request_ == 0 && !requiresLogin);
-    send_->setEnabled(command_->isEnabled());
+    if (command_) {
+        command_->setEnabled(connected_ && request_ == 0 && !requiresLogin);
+        send_->setEnabled(command_->isEnabled());
+    }
 }
 
 void RadioConsoleDialog::login() {
-    if (!login_->isEnabled() || nodeId_.isEmpty() || authorized_)
+    if (!login_->isEnabled() || nodeId_.isEmpty() || (authorized_ && !loginOnly_))
         return;
     const QString password = password_->text();
     password_->clear();
     const int id = client_.nextConsoleRequestId();
     request_ = id;
+    state_->setText(ui("Выполняется вход на узел…"));
     if (!client_.loginConsole(id, nodeId_, password)) {
         request_ = 0;
         state_->setText(ui("Вход недоступен. Проверьте связь и длину пароля."));
         return;
     }
-    state_->setText(ui("Выполняется вход на узел…"));
     updateControls();
 }
 
 void RadioConsoleDialog::submit() {
-    if (!send_->isEnabled())
+    if (!send_ || !send_->isEnabled())
         return;
     const QString command = command_->text().trimmed();
     if (command.isEmpty()) {
@@ -1299,9 +1250,13 @@ void RadioConsoleDialog::result(int requestId, int operation, bool success, cons
     if (request_ != requestId)
         return;
     request_ = 0;
-    if (operation == 2) {
-        authorized_ = success && client_.connected();
-        state_->setText(authorized_ ? ui("Вход выполнен.") : ui("Вход не выполнен."));
+    if (operation == meshcore::RadioConsole::Login) {
+        authorized_ = client_.nodeConsoleAuthorized(nodeId_);
+        if (success && loginOnly_) {
+            accept();
+            return;
+        }
+        state_->setText(success && !authorized_ ? ui("Вход выполнен без прав администратора.") : text);
     } else {
         state_->setText(success ? ui("Ответ получен.") : ui("Команда не подтверждена."));
     }
@@ -1310,7 +1265,7 @@ void RadioConsoleDialog::result(int requestId, int operation, bool success, cons
 }
 
 void RadioConsoleDialog::append(const QString& text) {
-    if (text.isEmpty())
+    if (!output_ || text.isEmpty())
         return;
     if (!transcript_.isEmpty())
         transcript_.append(QLatin1Char('\n'));

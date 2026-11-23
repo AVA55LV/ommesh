@@ -68,6 +68,7 @@ struct Contact {
     std::uint32_t lastAdvert = 0;
     std::int32_t latitude = 0;
     std::int32_t longitude = 0;
+    std::array<std::uint8_t, 64> pathHashes{};
 };
 
 struct Channel {

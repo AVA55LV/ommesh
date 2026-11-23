@@ -1,12 +1,15 @@
 #include "node_map.hpp"
+#include "appearance.hpp"
 #include "client.hpp"
 #include "local_tile_proxy.hpp"
+#include "settings_icons.hpp"
 
 #include <QtCore/QCache>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDataStream>
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
+#include <QtCore/QElapsedTimer>
 #include <QtCore/QFile>
 #include <QtCore/QLocale>
 #include <QtCore/QSet>
@@ -26,6 +29,7 @@
 #include <QtGui/QPainterPath>
 #include <QtGui/QPolygon>
 #include <QtGui/QPushButton>
+#include <QtGui/QToolButton>
 #include <QtGui/QVBoxLayout>
 #include <QtNetwork/QNetworkAccessManager>
 #include <QtNetwork/QNetworkDiskCache>
@@ -41,7 +45,6 @@ namespace {
 
 const QRgb Background = 0x151c22;
 const QRgb Chrome = 0x1b242c;
-const QRgb Surface = 0x24323a;
 const QRgb Paper = 0xeaf1f4;
 const QRgb Muted = 0xa3b1b8;
 const QRgb Accent = 0x62d5be;
@@ -59,8 +62,8 @@ const int MaximumTileBytes = 160 * 1024;
 const int MaximumOnlineZoom = 17;
 const int MaximumOfflineZoom = 19;
 const int MinimumOnlineZoom = 1;
-const int HeaderHeight = 36;
-const int ControlHeight = 50;
+const int CameraDuration = 165;
+const int CameraFrame = 26;
 const int EmptyX = 73375000;
 const int EmptyY = 55000000;
 const double Pi = 3.14159265358979323846;
@@ -251,12 +254,84 @@ bool readAtlas(QIODevice& file, Atlas& output) {
 struct Pin {
     QString id;
     QString name;
-    int role;
+    int role = 0;
     QPointF position;
 
     bool operator==(const Pin& other) const {
         return id == other.id && name == other.name && role == other.role && position == other.position;
     }
+};
+
+bool nodePosition(const NetworkNode& node) {
+    return (node.latitude != 0 || node.longitude != 0) &&
+        coordinate(node.latitude, node.longitude);
+}
+
+enum MapControl { Layers, Fit, Center, Expand, ZoomIn, ZoomOut, MapControlCount };
+
+class MapButton : public QToolButton {
+public:
+    MapButton(int control, const char* name, const char* caption, QWidget* parent)
+        : QToolButton(parent), control_(control) {
+        setObjectName(QLatin1String(name));
+        describe(caption);
+    }
+
+    void describe(const char* caption) {
+        const QString text = ru(caption);
+        setText(text);
+        setToolTip(text);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        const Appearance::Palette palette = Appearance::paletteFor(this);
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(QPen(hasFocus() || isChecked() ? palette.accent : palette.border));
+        painter.setBrush(isDown() || isChecked() ? palette.selection : palette.chrome);
+        painter.drawRoundedRect(rect().adjusted(0, 0, -1, -1), 8, 8);
+
+        const QColor ink = isEnabled() ? palette.text : palette.muted;
+        const int diameter = qBound(13, width() - 10, 20);
+        const QPoint position = rect().center();
+        if (control_ == Layers) {
+            SettingsIcons::draw(painter, SettingsIcons::Map,
+                QRect(position.x() - diameter / 2, position.y() - diameter / 2, diameter, diameter), ink);
+            return;
+        }
+        painter.translate(position);
+        const int edge = diameter / 2 - 2;
+        painter.setBrush(Qt::NoBrush);
+        painter.setPen(QPen(ink, 1.6, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        if (control_ == Fit) {
+            painter.drawRect(-edge, -edge + 2, 2 * edge, 2 * edge - 4);
+            painter.drawEllipse(QPoint(0, 0), 2, 2);
+        } else if (control_ == Center) {
+            painter.drawEllipse(QPoint(0, 0), edge - 2, edge - 2);
+            painter.drawLine(-edge, 0, -edge + 3, 0);
+            painter.drawLine(edge, 0, edge - 3, 0);
+            painter.drawLine(0, -edge, 0, -edge + 3);
+            painter.drawLine(0, edge, 0, edge - 3);
+        } else if (control_ == Expand) {
+            const int side = isChecked() ? edge - 2 : edge;
+            const int arm = qMin(side, 4);
+            for (int x : {-1, 1}) {
+                for (int y : {-1, 1}) {
+                    const QPoint corner(side * x, side * y);
+                    painter.drawLine(corner, QPoint((side - arm) * x, side * y));
+                    painter.drawLine(corner, QPoint(side * x, (side - arm) * y));
+                }
+            }
+        } else {
+            painter.drawLine(-edge, 0, edge, 0);
+            if (control_ == ZoomIn)
+                painter.drawLine(0, -edge, 0, edge);
+        }
+    }
+
+private:
+    int control_;
 };
 
 struct TilePlacement {
@@ -608,6 +683,13 @@ struct NodeMap::State {
     QTimer settle;
     QTimer deadline;
     QTimer buildingTimer;
+    QTimer camera;
+    QElapsedTimer cameraClock;
+    QPointF cameraFrom;
+    QPointF cameraTo;
+    double cameraScale = 0.0;
+    double cameraFromScale = 0.0;
+    int cameraZoom = 8;
     BuildingLayer buildings;
     QVector<quint32> buildingView;
     QVector<quint32> buildingQueue;
@@ -628,6 +710,9 @@ struct NodeMap::State {
     Atlas detail;
     QSet<int> missingAtlases;
     QVector<Pin> pins;
+    QVector<QPair<QRect, QString>> pinLabels;
+    Pin self;
+    QString focused;
     int nodeCount = 0;
     QPointF center;
     int zoom = 8;
@@ -637,6 +722,7 @@ struct NodeMap::State {
     bool dragging = false;
     QPoint first;
     QPoint last;
+    MapButton* buttons[MapControlCount] = {};
 
     void mark(const char* step, int value = Client::TraceWithoutValue) const {
         if (trace) {
@@ -644,40 +730,52 @@ struct NodeMap::State {
         }
     }
 
-    QRect mapRect() const {
-        return QRect(0, HeaderHeight, owner->width(), qMax(1, owner->height() - HeaderHeight - ControlHeight));
+    QRect mapRect() const { return owner->rect(); }
+
+    int controlSize() const {
+        return qBound(18, (mapRect().height() - 15 - (MapControlCount - 1) * 4) / MapControlCount, 36);
     }
 
     QRect control(int index) const {
-        const int w = owner->width() / 3;
-        return QRect(index * w + 5, mapRect().bottom() + 7, qMax(1, w - 10), ControlHeight - 12);
+        const int size = controlSize();
+        return QRect(mapRect().right() - size - 6, mapRect().top() + 7 + index * (size + 4), size, size);
     }
 
-    QRect atlasButton() const {
-        return QRect(owner->width() - 80, 2, 75, HeaderHeight - 4);
+    void placeControls() {
+        for (int i = 0; i < MapControlCount; ++i)
+            buttons[i]->setGeometry(control(i));
+    }
+
+    QRect openMapRect() const {
+        QRect field = mapRect();
+        field.setRight(qMax(field.left(), control(0).left() - 5));
+        return field;
     }
 
     QRect hintRect() const {
-        const QRect map = mapRect();
-        return QRect(map.left() + 9, qMax(map.top() + 4, map.bottom() - 77), qMax(1, map.width() - 18), 38);
+        const QRect field = openMapRect();
+        return QRect(field.left() + 9, qMax(field.top() + 28, field.bottom() - 70),
+                     qMax(1, field.width() - 18), 35);
     }
 
-    double scale() const { return static_cast<double>(TileSide << zoom); }
+    static double zoomScale(int level) { return static_cast<double>(TileSide << level); }
+    double scale() const { return cameraScale > 0.0 ? cameraScale : zoomScale(zoom); }
+    QPoint mapAnchor() const { return openMapRect().center(); }
 
     QPointF screen(const QPointF& world) const {
-        const QPoint midpoint = mapRect().center();
+        const QPoint midpoint = mapAnchor();
         return QPointF(midpoint.x() + (nearX(world.x(), center.x()) - center.x()) * scale(),
                        midpoint.y() + (world.y() - center.y()) * scale());
     }
 
     QPointF areaTopLeft(const QRect& area, double offset) const {
-        const QPoint middle = mapRect().center();
+        const QPoint middle = mapAnchor();
         return QPointF(center.x() + (area.left() - middle.x()) / scale() - offset,
                        center.y() + (area.top() - middle.y()) / scale());
     }
 
     QPointF areaBottomRight(const QRect& area, double offset) const {
-        const QPoint middle = mapRect().center();
+        const QPoint middle = mapAnchor();
         return QPointF(center.x() + (area.right() - middle.x()) / scale() - offset,
                        center.y() + (area.bottom() - middle.y()) / scale());
     }
@@ -748,7 +846,7 @@ struct NodeMap::State {
     int minimumZoom() const { return source == Offline ? 0 : MinimumOnlineZoom; }
     int maximumZoom() const { return source == Offline ? MaximumOfflineZoom : MaximumOnlineZoom; }
 
-    void fit() {
+    QPair<QPointF, int> fittedView() const {
         QRectF regionBox = regionBounds(region);
         bool frameRegion = framing == SavedRegion;
         if (!frameRegion && framing == Automatic && source == Offline) {
@@ -772,16 +870,24 @@ struct NodeMap::State {
             }
             regionBox = QRectF(QPointF(left, top), QPointF(right, bottom));
         }
-        center = regionBox.center();
-        center.setX(wrapped(center.x()));
-        const QRect map = mapRect();
+        QPointF target = regionBox.center();
+        target.setX(wrapped(target.x()));
+        const QRect map = openMapRect();
         const double minimumSpan = 0.000095;
-        const double limit = qMin(qMax(1, map.width() - 48) / std::max(minimumSpan, static_cast<double>(regionBox.width())),
+        const double limit = qMin(qMax(1, map.width() - 36) / std::max(minimumSpan, static_cast<double>(regionBox.width())),
                                   qMax(1, map.height() - 48) / std::max(minimumSpan, static_cast<double>(regionBox.height())));
-        zoom = minimumZoom();
-        while (zoom < maximumZoom() && static_cast<double>(TileSide << (zoom + 1)) <= limit) {
-            ++zoom;
+        int level = minimumZoom();
+        while (level < maximumZoom() && zoomScale(level + 1) <= limit) {
+            ++level;
         }
+        return qMakePair(target, level);
+    }
+
+    void fit() {
+        stopCamera();
+        const QPair<QPointF, int> view = fittedView();
+        center = view.first;
+        zoom = view.second;
     }
 
     QVector<TilePlacement> tiles() const {
@@ -790,27 +896,35 @@ struct NodeMap::State {
         if (map.width() <= 0) {
             return result;
         }
-        const QPoint midpoint = map.center();
-        const int globalX = static_cast<int>(std::floor(center.x() * scale() - (midpoint.x() - map.left())));
-        const int globalY = static_cast<int>(std::floor(center.y() * scale() - (midpoint.y() - map.top())));
+        const QPoint midpoint = mapAnchor();
+        const double tileScale = zoomScale(zoom);
+        const double ratio = scale() / tileScale;
+        const double globalX = std::floor(center.x() * tileScale - (midpoint.x() - map.left()) / ratio);
+        const double globalY = std::floor(center.y() * tileScale - (midpoint.y() - map.top()) / ratio);
         const int mask = (1 << zoom) - 1;
         int left = static_cast<int>(std::floor(globalX / 256.0));
-        int right = static_cast<int>(std::floor((globalX + map.width() - 1) / 256.0));
-        int top = qMax(0, globalY / TileSide);
-        int bottom = qMin(mask, static_cast<int>(std::floor((globalY + map.height() - 1) / 256.0)));
+        int right = static_cast<int>(std::floor((globalX + (map.width() - 1) / ratio) / TileSide));
+        int top = qMax(0, static_cast<int>(std::floor(globalY / TileSide)));
+        int bottom = qMin(mask, static_cast<int>(std::floor((globalY + (map.height() - 1) / ratio) / TileSide)));
         // The 640px phone screen needs at most four tiles along either axis.
-        if (right - left >= 4) {
+        // At a fractional zoom, old cached tiles are only used while animating.
+        const int limit = camera.isActive() ? 6 : 4;
+        if (right - left >= limit) {
             left = (left + right) / 2 - 1;
-            right = left + 3;
+            right = left + limit - 1;
         }
-        if (bottom - top >= 4) {
+        if (bottom - top >= limit) {
             top = (top + bottom) / 2 - 1;
-            bottom = top + 3;
+            bottom = qMin(mask, top + limit - 1);
         }
         for (int y = top; y <= bottom; ++y) {
             for (int x = left; x <= right; ++x) {
-                TilePlacement tile = {zoom, x & mask, y,
-                    QRect(map.left() + x * TileSide - globalX, map.top() + y * TileSide - globalY, TileSide, TileSide)};
+                const int pixelX = qRound((x * TileSide - globalX) * ratio);
+                const int pixelY = qRound((y * TileSide - globalY) * ratio);
+                const int tileWidth = qRound(((x + 1) * TileSide - globalX) * ratio) - pixelX;
+                const int tileHeight = qRound(((y + 1) * TileSide - globalY) * ratio) - pixelY;
+                TilePlacement tile = {zoom, x & mask, y, QRect(map.left() + pixelX, map.top() + pixelY,
+                                                             tileWidth, tileHeight)};
                 if (tile.rect.intersects(map)) {
                     result.append(tile);
                 }
@@ -847,7 +961,7 @@ struct NodeMap::State {
     }
 
     void schedule() {
-        if (source != Loopback || !owner->isVisible()) {
+        if (source != Loopback || !owner->isVisible() || camera.isActive()) {
             return;
         }
         QSet<QString> nextVisible;
@@ -921,6 +1035,8 @@ struct NodeMap::State {
             });
         }
         if (wanted == buildingView) {
+            if (!buildingQueue.isEmpty() && !buildingTimer.isActive())
+                buildingTimer.start(85);
             return;
         }
         buildingView = wanted;
@@ -1037,13 +1153,66 @@ struct NodeMap::State {
         schedule();
     }
 
-    void adjustZoom(int delta) {
-        zoom = qBound(minimumZoom(), zoom + delta, maximumZoom());
-        framing = Manual;
+    void stopCamera() {
+        camera.stop();
+        cameraScale = 0.0;
+    }
+
+    void setCamera(const QPointF& target, int level) {
+        stopCamera();
+        center = QPointF(wrapped(target.x()), target.y());
+        zoom = level;
         updateView();
     }
 
+    void moveCamera(QPointF target, int level) {
+        level = qBound(minimumZoom(), level, maximumZoom());
+        target.setX(nearX(target.x(), center.x()));
+        const double currentScale = scale();
+        const double targetScale = zoomScale(level);
+        const double distance = (target - center).manhattanLength() * qMin(currentScale, targetScale);
+        if (!owner->isVisible() || qAbs(level - zoom) > 1 ||
+            distance > 2 * qMax(owner->width(), owner->height()) ||
+            (distance < 1.0 && currentScale == targetScale)) {
+            setCamera(target, level);
+            return;
+        }
+        cameraFrom = center;
+        cameraTo = target;
+        cameraScale = cameraFromScale = currentScale;
+        cameraZoom = level;
+        settle.stop();
+        buildingTimer.stop();
+        cameraClock.start();
+        camera.start(CameraFrame);
+    }
+
+    void cameraFrame() {
+        const double progress = cameraClock.elapsed() / static_cast<double>(CameraDuration);
+        if (progress >= 1.0) {
+            setCamera(cameraTo, cameraZoom);
+            return;
+        }
+        const double remaining = 1.0 - progress;
+        const double eased = 1.0 - remaining * remaining * remaining;
+        center = cameraFrom + (cameraTo - cameraFrom) * eased;
+        center.setX(wrapped(center.x()));
+        cameraScale = cameraFromScale + (zoomScale(cameraZoom) - cameraFromScale) * eased;
+        owner->update();
+    }
+
+    void moveToFit() {
+        const QPair<QPointF, int> view = fittedView();
+        moveCamera(view.first, view.second);
+    }
+
+    void adjustZoom(int delta) {
+        framing = Manual;
+        moveCamera(center, (camera.isActive() ? cameraZoom : zoom) + delta);
+    }
+
     void pan(const QPoint& pixels) {
+        stopCamera();
         center.setX(wrapped(center.x() - pixels.x() / scale()));
         center.setY(qBound(0.0, center.y() - pixels.y() / scale(), 1.0));
         framing = Manual;
@@ -1053,17 +1222,25 @@ struct NodeMap::State {
     void overview() {
         if (!issue.isEmpty()) {
             clearIssue();
+            updateView();
         } else {
             framing = Markers;
-            fit();
+            moveToFit();
         }
-        updateView();
     }
 
     void showRegion() {
         framing = SavedRegion;
-        fit();
-        updateView();
+        moveToFit();
+    }
+
+    void centerOnRadio() {
+        if (self.id.isEmpty()) {
+            showRegion();
+            return;
+        }
+        framing = Manual;
+        moveCamera(self.position, camera.isActive() ? cameraZoom : zoom);
     }
 
     bool prepareLoopback() {
@@ -1136,9 +1313,10 @@ struct NodeMap::State {
 
     void grid(QPainter& painter, const QRect& map) const {
         painter.setPen(color(0x26343b));
-        const int left = static_cast<int>(std::fmod(map.center().x() - center.x() * scale(), 44));
-        const int top = static_cast<int>(std::fmod(map.center().y() - center.y() * scale() - map.top(), 44));
-        for (int x = left; x < map.width(); x += 44) {
+        const QPoint midpoint = mapAnchor();
+        const int left = static_cast<int>(std::fmod(midpoint.x() - center.x() * scale() - map.left(), 44));
+        const int top = static_cast<int>(std::fmod(midpoint.y() - center.y() * scale() - map.top(), 44));
+        for (int x = map.left() + left; x <= map.right(); x += 44) {
             painter.drawLine(x, map.top(), x, map.bottom());
         }
         for (int y = map.top() + top; y <= map.bottom(); y += 44) {
@@ -1152,7 +1330,7 @@ struct NodeMap::State {
             return false;
         }
         const double nearest = nearX(atlas.bounds.center().x(), center.x()) - atlas.bounds.center().x();
-        const QPoint midpoint = map.center();
+        const QPoint midpoint = mapAnchor();
         const int copies = kind == World ? 1 : 0;
         bool drawn = false;
         for (int copy = -copies; copy <= copies; ++copy) {
@@ -1240,65 +1418,128 @@ struct NodeMap::State {
             const TilePlacement& tile = placements.at(i);
             const CachedImage* image = memory.object(tile.path());
             if (image) {
-                painter.drawImage(tile.rect.topLeft(), image->image);
+                if (tile.rect.size() == image->image.size())
+                    painter.drawImage(tile.rect.topLeft(), image->image);
+                else
+                    painter.drawImage(tile.rect, image->image);
                 drawn = true;
             }
         }
         return drawn;
     }
 
-    void drawPins(QPainter& painter, const QRect& viewport) const {
-        QVector<QRect> labels;
-        QFont font = painter.font();
-        font.setBold(false);
-        painter.setFont(font);
-        const QFontMetrics metrics(font);
-        painter.setRenderHint(QPainter::Antialiasing);
+    void drawPin(QPainter& painter, const Pin& pin, const QPoint& position) const {
+        if (pin.id == focused || pin.id == self.id) {
+            painter.setPen(QPen(color(pin.id == self.id ? Accent : Paper), 1));
+            painter.setBrush(Qt::NoBrush);
+            painter.drawEllipse(position, 11, 11);
+        }
+        painter.setPen(QPen(color(Background), 2));
+        if (pin.role == 2) {
+            painter.setBrush(color(Repeater));
+            const QPoint diamond[] = {position + QPoint(0, -7), position + QPoint(7, 0),
+                position + QPoint(0, 7), position + QPoint(-7, 0)};
+            painter.drawPolygon(diamond, 4);
+        } else if (pin.role == 3) {
+            painter.setBrush(color(Room));
+            painter.drawRoundedRect(QRect(position.x() - 5, position.y() - 5, 11, 11), 3, 3);
+        } else {
+            painter.setBrush(color(pin.role == 4 ? Sensor : Accent));
+            painter.drawEllipse(position, 6, 6);
+        }
+    }
+
+    void drawPins(QPainter& painter, const QRect& viewport) {
+        struct VisiblePin { const Pin* pin; QPoint position; };
+        QVector<VisiblePin> visible;
+        visible.reserve(pins.size());
+        pinLabels.clear();
         for (int i = 0; i < pins.size(); ++i) {
             const Pin& pin = pins.at(i);
             const QPoint position = screen(pin.position).toPoint();
-            if (!viewport.contains(position)) {
+            if (!viewport.contains(position))
                 continue;
-            }
-            painter.setPen(QPen(color(Background), 2));
-            if (pin.role == 2) {
-                painter.setBrush(color(Repeater));
-                const QPoint diamond[] = {position + QPoint(0, -7), position + QPoint(7, 0),
-                    position + QPoint(0, 7), position + QPoint(-7, 0)};
-                painter.drawPolygon(diamond, 4);
-            } else if (pin.role == 3) {
-                painter.setBrush(color(Room));
-                painter.drawRoundedRect(QRect(position.x() - 5, position.y() - 5, 11, 11), 3, 3);
-            } else {
-                painter.setBrush(color(pin.role == 4 ? Sensor : Accent));
-                painter.drawEllipse(position, 6, 6);
-            }
-            if (pin.name.isEmpty() || labels.size() >= 16) {
+            const VisiblePin item = {&pin, position};
+            if (pin.id == focused || pin.id == self.id)
+                visible.prepend(item);
+            else
+                visible.append(item);
+        }
+
+        painter.save();
+        painter.setRenderHint(QPainter::Antialiasing);
+        for (int i = visible.size() - 1; i >= 0; --i) {
+            const VisiblePin& item = visible.at(i);
+            drawPin(painter, *item.pin, item.position);
+        }
+
+        QFont font = painter.font();
+        font.setPixelSize(12);
+        font.setBold(false);
+        painter.setFont(font);
+        const QFontMetrics metrics(font);
+        const QRect labelArea = openMapRect().adjusted(6, 36, -4, -35);
+        const int limit = qBound(5, viewport.width() * viewport.height() / 8200, 16);
+        const int candidatesLimit = qMin(visible.size(), 72);
+        for (int i = 0; i < candidatesLimit && pinLabels.size() < limit; ++i) {
+            const Pin& pin = *visible.at(i).pin;
+            const QPoint& position = visible.at(i).position;
+            if (pin.name.isEmpty())
                 continue;
-            }
-            const QString name = metrics.elidedText(pin.name, Qt::ElideRight, 98);
+            const QString name = metrics.elidedText(pin.name, Qt::ElideRight, 106);
             const int w = metrics.width(name) + 8;
-            const int x = position.x() + 12 + w < viewport.right() ? position.x() + 10 : position.x() - w - 10;
-            const QRect label(x, position.y() - metrics.height() / 2 - 1, w, metrics.height() + 2);
-            bool crowded = !viewport.contains(label);
-            for (int j = 0; j < labels.size() && !crowded; ++j) {
-                crowded = labels.at(j).intersects(label.adjusted(-4, -2, 4, 2));
-            }
-            if (!crowded) {
-                labels.append(label);
-                painter.fillRect(label, color(Background));
-                painter.setPen(color(Paper));
+            const int h = metrics.height() + 4;
+            const QRect candidates[] = {
+                QRect(position.x() + 11, position.y() - h / 2, w, h),
+                QRect(position.x() - w - 10, position.y() - h / 2, w, h),
+                QRect(position.x() - w / 2, position.y() - h - 10, w, h),
+                QRect(position.x() - w / 2, position.y() + 11, w, h)
+            };
+            for (const QRect& label : candidates) {
+                if (!labelArea.contains(label))
+                    continue;
+                const QRect padding = label.adjusted(-4, -2, 4, 2);
+                bool crowded = false;
+                for (int j = 0; j < pinLabels.size() && !crowded; ++j)
+                    crowded = pinLabels.at(j).first.intersects(padding);
+                for (int j = 0; j < visible.size() && !crowded; ++j) {
+                    const QPoint& other = visible.at(j).position;
+                    crowded = j != i && padding.intersects(QRect(other.x() - 6, other.y() - 6, 13, 13));
+                }
+                if (crowded)
+                    continue;
+                pinLabels.append(qMakePair(label, pin.id));
+                painter.setPen(Qt::NoPen);
+                painter.setBrush(color(Background));
+                painter.drawRoundedRect(label, 4, 4);
+                painter.setPen(color(pin.id == focused || pin.id == self.id ? Accent : Paper));
                 painter.drawText(label, Qt::AlignCenter, name);
+                break;
             }
         }
-        painter.setRenderHint(QPainter::Antialiasing, false);
+        painter.restore();
     }
 };
 
 NodeMap::NodeMap(QWidget* parent) : QWidget(parent), state_(new State(this)) {
-    setMinimumSize(200, 190);
+    setMinimumSize(190, 156);
     setFocusPolicy(Qt::StrongFocus);
     setAttribute(Qt::WA_OpaquePaintEvent);
+    auto* controls = new QButtonGroup(this);
+    controls->setExclusive(false);
+    const char* const names[] = {"mapLayers", "mapFit", "mapCenter", "mapExpand", "mapZoomIn", "mapZoomOut"};
+    const char* const captions[] = {"Подложки карты", "Все узлы", "Начальная область", "Развернуть карту",
+                                    "Приблизить", "Отдалить"};
+    for (int i = 0; i < MapControlCount; ++i) {
+        MapButton* button = new MapButton(i, names[i], captions[i], this);
+        button->setFocusPolicy(Qt::StrongFocus);
+        state_->buttons[i] = button;
+        controls->addButton(button, i);
+    }
+    state_->buttons[Expand]->setCheckable(true);
+    state_->placeControls();
+    connect(controls, SIGNAL(buttonClicked(int)), this, SLOT(activateControl(int)), Qt::QueuedConnection);
+    connect(&state_->camera, SIGNAL(timeout()), this, SLOT(advanceCamera()));
     connect(&state_->settle, SIGNAL(timeout()), this, SLOT(loadVisibleTiles()));
     connect(&state_->deadline, SIGNAL(timeout()), this, SLOT(tileTimedOut()));
     connect(&state_->buildingTimer, SIGNAL(timeout()), this, SLOT(loadVisibleBuildings()));
@@ -1324,6 +1565,7 @@ void NodeMap::setSource(Source source) {
         return;
     }
     s.mark("map: apply source", static_cast<int>(source));
+    s.stopCamera();
     s.cancel();
     s.stopLoopback();
     s.firstTile = true;
@@ -1353,10 +1595,10 @@ void NodeMap::setNodes(const QVector<NetworkNode>& nodes) {
     pins.reserve(nodes.size());
     for (int i = 0; i < nodes.size(); ++i) {
         const NetworkNode& node = nodes.at(i);
-        if ((node.latitude == 0 && node.longitude == 0) || !coordinate(node.latitude, node.longitude)) {
+        if (!nodePosition(node)) {
             continue;
         }
-        const Pin pin = {node.id, node.title, node.role, project(node.latitude, node.longitude)};
+        const Pin pin = {node.id, node.title.simplified(), node.role, project(node.latitude, node.longitude)};
         pins.append(pin);
     }
     if (pins == s.pins && nodes.size() == s.nodeCount) {
@@ -1370,8 +1612,56 @@ void NodeMap::setNodes(const QVector<NetworkNode>& nodes) {
     s.updateView();
 }
 
+void NodeMap::setSelfNode(const NetworkNode& node) {
+    State& s = *state_;
+    const bool positioned = nodePosition(node) && !node.id.isEmpty();
+    const Pin self = positioned ? Pin{node.id, node.title, node.role, project(node.latitude, node.longitude)}
+                                : Pin();
+    if (self == s.self)
+        return;
+    s.self = self;
+    s.buttons[Center]->describe(positioned ? "К своему радио" : "Начальная область");
+    update();
+}
+
+bool NodeMap::focusNode(const NetworkNode& node) {
+    if (!nodePosition(node))
+        return false;
+    State& s = *state_;
+    s.focused = node.id;
+    s.framing = State::Manual;
+    s.moveCamera(project(node.latitude, node.longitude), qMax(13, s.zoom));
+    update();
+    return true;
+}
+
+void NodeMap::setExpanded(bool expanded) {
+    MapButton* button = state_->buttons[Expand];
+    button->setChecked(expanded);
+    button->describe(expanded ? "Свернуть карту" : "Развернуть карту");
+}
+
+void NodeMap::activateControl(int control) {
+    if (!isVisible())
+        return;
+    State& s = *state_;
+    switch (control) {
+        case Layers: emit settingsRequested(); break;
+        case Fit: s.overview(); break;
+        case Center: s.centerOnRadio(); break;
+        case Expand: emit expansionRequested(); break;
+        case ZoomIn: s.adjustZoom(1); break;
+        case ZoomOut: s.adjustZoom(-1); break;
+    }
+}
+
+void NodeMap::advanceCamera() {
+    state_->cameraFrame();
+}
+
 void NodeMap::resizeEvent(QResizeEvent* event) {
     QWidget::resizeEvent(event);
+    state_->placeControls();
     if (state_->framing != State::Manual) {
         state_->fit();
     }
@@ -1391,11 +1681,18 @@ void NodeMap::showEvent(QShowEvent* event) {
 }
 
 void NodeMap::hideEvent(QHideEvent* event) {
+    if (state_->camera.isActive()) {
+        state_->center = state_->cameraTo;
+        state_->center.setX(wrapped(state_->center.x()));
+        state_->zoom = state_->cameraZoom;
+        state_->stopCamera();
+    }
     if (state_->source == Loopback) {
         state_->cancel();
         state_->stopLoopback();
     }
     state_->buildingTimer.stop();
+    state_->pinLabels.clear();
     state_->buildingView.clear();
     state_->buildingQueue.clear();
     state_->buildings.releaseSectors();
@@ -1446,17 +1743,15 @@ void NodeMap::mouseReleaseEvent(QMouseEvent* event) {
     if (s.dragging || (point - s.first).manhattanLength() >= 7) {
         return;
     }
-    if (s.atlasButton().contains(point)) {
-        s.showRegion();
-    } else if (s.control(0).contains(point)) {
-        s.adjustZoom(-1);
-    } else if (s.control(1).contains(point)) {
-        s.overview();
-    } else if (s.control(2).contains(point)) {
-        s.adjustZoom(1);
-    } else if (!s.issue.isEmpty() && s.hintRect().contains(point)) {
+    if (!s.issue.isEmpty() && s.hintRect().contains(point)) {
         emit settingsRequested();
     } else if (s.mapRect().contains(point)) {
+        for (int i = 0; i < s.pinLabels.size(); ++i) {
+            if (s.pinLabels.at(i).first.contains(point)) {
+                emit nodeSelected(s.pinLabels.at(i).second);
+                return;
+            }
+        }
         QList<Pin> hits;
         for (int i = 0; i < s.pins.size(); ++i) {
             const Pin& pin = s.pins.at(i);
@@ -1492,6 +1787,7 @@ void NodeMap::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_Minus: s.adjustZoom(-1); break;
         case Qt::Key_0: s.overview(); break;
         case Qt::Key_O: s.showRegion(); break;
+        case Qt::Key_C: s.centerOnRadio(); break;
         default: QWidget::keyPressEvent(event); break;
     }
 }
@@ -1506,6 +1802,7 @@ void NodeMap::paintEvent(QPaintEvent*) {
     QPainter painter(this);
     painter.fillRect(rect(), color(Background));
     const QRect map = s.mapRect();
+    const QRect field = s.openMapRect();
     const QVector<TilePlacement> placements = s.source == Offline ? QVector<TilePlacement>() : s.tiles();
     const bool complete = s.fullyDrawn(placements);
     QFont font = painter.font();
@@ -1519,6 +1816,25 @@ void NodeMap::paintEvent(QPaintEvent*) {
     const bool buildings = s.drawBuildings(painter, map);
     const bool online = s.drawTiles(painter, placements);
     s.drawPins(painter, map);
+    font.setPixelSize(11);
+    painter.setFont(font);
+    const QFontMetrics details(font);
+
+    const QString caption = s.source == Offline && s.issue.isEmpty()
+        ? ru("Офлайн · %1").arg(regionCaption(s.region))
+        : s.status(complete);
+    const int captionWidth = details.width(caption) + 2;
+    const int statusWidth = qMin(field.width() - 12, captionWidth + 16);
+    const QRect status(field.left() + 6, field.top() + 6, statusWidth, 22);
+    painter.setRenderHint(QPainter::Antialiasing);
+    painter.setPen(Qt::NoPen);
+    painter.setBrush(color(Chrome));
+    painter.drawRoundedRect(status, 6, 6);
+    painter.setPen(color(s.issue.isEmpty() ? Paper : Repeater));
+    painter.drawText(status.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
+                     captionWidth <= statusWidth - 16 ? caption
+                         : details.elidedText(caption, Qt::ElideRight, qMax(1, statusWidth - 16)));
+    painter.setRenderHint(QPainter::Antialiasing, false);
 
     // Keep every visible layer's credit above the pins and scale.
     QStringList attribution;
@@ -1531,19 +1847,19 @@ void NodeMap::paintEvent(QPaintEvent*) {
     if (attribution.isEmpty() && (s.source == Offline || !s.issue.isEmpty())) {
         attribution.append(ru("Подложка недоступна"));
     }
+    QRect footer;
     if (!attribution.isEmpty()) {
         int w = 0;
-        const QFontMetrics metrics(font);
         for (int i = 0; i < attribution.size(); ++i) {
-            w = qMax(w, metrics.width(attribution.at(i)));
+            w = qMax(w, details.width(attribution.at(i)));
         }
-        const int attributionHeight = metrics.height() * attribution.size() + 7;
-        const QRect footer(map.right() - w - 19, map.bottom() - attributionHeight - 2,
-                           w + 14, attributionHeight);
-        painter.setFont(font);
+        const int attributionHeight = details.height() * attribution.size() + 6;
+        const int width = qMin(w + 10, field.width() - 8);
+        footer = QRect(field.right() - width - 3, field.bottom() - attributionHeight - 2,
+                       width, attributionHeight);
         painter.fillRect(footer, color(Background));
         painter.setPen(color(Muted));
-        painter.drawText(footer.adjusted(7, 0, -7, 0), Qt::AlignRight | Qt::AlignVCenter,
+        painter.drawText(footer.adjusted(5, 0, -5, 0), Qt::AlignRight | Qt::AlignVCenter,
             attribution.join(QLatin1String("\n")));
     }
     const double latitudeScale = 1.0 / std::cosh((0.5 - s.center.y()) * 2 * Pi);
@@ -1556,8 +1872,10 @@ void NodeMap::paintEvent(QPaintEvent*) {
     const int distance = static_cast<int>((available >= unit * 5 ? 5 : available >= unit * 2 ? 2 : 1) * unit);
     const int pixels = qMax(1, static_cast<int>(distance / metersPerPixel));
     const QString distanceLabel = distance >= 1000 ? ru("%1 км").arg(distance / 1000) : ru("%1 м").arg(distance);
-    const int baseline = map.bottom() - 8;
-    painter.fillRect(QRect(6, baseline - 19, qMax(pixels, QFontMetrics(font).width(distanceLabel)) + 15, 25), color(Background));
+    const int scaleWidth = qMax(pixels, details.width(distanceLabel)) + 14;
+    const int baseline = !footer.isEmpty() && field.left() + scaleWidth + 10 >= footer.left()
+        ? footer.top() - 6 : field.bottom() - 8;
+    painter.fillRect(QRect(field.left() + 6, baseline - 18, scaleWidth, 23), color(Background));
     painter.setPen(color(Muted));
     painter.drawText(13, baseline - 5, distanceLabel);
     painter.drawLine(13, baseline, 13 + pixels, baseline);
@@ -1570,38 +1888,12 @@ void NodeMap::paintEvent(QPaintEvent*) {
         painter.drawText(hint.adjusted(6, 2, -6, -2), Qt::AlignCenter, ru("Открыть настройки карты"));
     }
     painter.restore();
-
-    painter.fillRect(0, 0, width(), HeaderHeight, color(Chrome));
-    painter.fillRect(0, map.bottom() + 1, width(), ControlHeight, color(Chrome));
-    painter.setPen(color(Muted));
-    painter.setFont(font);
-    const int statusWidth = width() - 27 - s.atlasButton().width();
-    painter.drawText(QRect(11, 0, statusWidth, HeaderHeight), Qt::AlignVCenter | Qt::AlignLeft,
-        QFontMetrics(font).elidedText(s.status(complete), Qt::ElideRight, statusWidth));
-    const QRect jump = s.atlasButton();
-    painter.setPen(Qt::NoPen);
-    painter.setBrush(color(Surface));
-    painter.drawRoundedRect(jump, 8, 8);
-    painter.setPen(color(Accent));
-    painter.drawText(jump, Qt::AlignCenter, regionCaption(s.region));
-    const QString controls[] = {ru("−"), s.issue.isEmpty() ? ru("Обзор") : ru("Повторить"),
-                                QString::fromLatin1("+")};
-    font.setBold(true);
-    painter.setFont(font);
-    painter.setRenderHint(QPainter::Antialiasing);
-    for (int i = 0; i < 3; ++i) {
-        const QRect button = s.control(i);
-        painter.setPen(Qt::NoPen);
-        painter.setBrush(color(Surface));
-        painter.drawRoundedRect(button, 9, 9);
-        painter.setPen(color(Accent));
-        painter.drawText(button, Qt::AlignCenter, controls[i]);
-    }
 }
 
 void NodeMap::loadVisibleBuildings() {
     State& s = *state_;
-    if (!isVisible() || s.source != Offline || s.zoom < BuildingZoom || s.buildingQueue.isEmpty()) {
+    if (!isVisible() || s.camera.isActive() || s.source != Offline || s.zoom < BuildingZoom ||
+        s.buildingQueue.isEmpty()) {
         return;
     }
     if (!s.buildings.tried()) {
@@ -1632,12 +1924,12 @@ void NodeMap::loadVisibleBuildings() {
 
 void NodeMap::loadVisibleTiles() {
     State& s = *state_;
-    if (s.source != Loopback || s.reply || !isVisible() || !s.issue.isEmpty()) {
+    if (s.source != Loopback || s.reply || !isVisible() || !s.issue.isEmpty() || s.camera.isActive()) {
         return;
     }
     s.prepareNetwork();
     QVector<TilePlacement> placements = s.tiles();
-    const QPoint middle = s.mapRect().center();
+    const QPoint middle = s.mapAnchor();
     std::sort(placements.begin(), placements.end(), [middle](const TilePlacement& left, const TilePlacement& right) {
         return (left.rect.center() - middle).manhattanLength() < (right.rect.center() - middle).manhattanLength();
     });
@@ -1668,7 +1960,7 @@ void NodeMap::loadVisibleTiles() {
             return;
         }
         QNetworkRequest request(QUrl(s.localProxy->baseUrl() + key));
-        request.setRawHeader("User-Agent", "OMMesh-Belle-SIS/0.2.17 (+https://github.com/cm4ker/ommesh)");
+        request.setRawHeader("User-Agent", "OMMesh-Belle-SIS/0.2.19 (+https://github.com/cm4ker/ommesh)");
         request.setRawHeader("Accept", "image/png");
         request.setRawHeader("Accept-Encoding", "identity");
         const QNetworkCacheMetaData::RawHeaderList previous = saved.rawHeaders();
@@ -1787,7 +2079,7 @@ void NodeMap::finishTile() {
     s.requestError.clear();
     if (!failure.isEmpty()) {
         s.issue = failure;
-    } else if (isVisible() && !s.settle.isActive()) {
+    } else if (isVisible() && !s.settle.isActive() && !s.camera.isActive()) {
         s.settle.start(0);
     }
     update();
