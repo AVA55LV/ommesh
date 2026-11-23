@@ -22,7 +22,7 @@
 
 This fork adds an unofficial native Symbian Belle client for MeshCore. The app connects to a MeshCore Companion Wi-Fi radio over TCP and provides direct messages, channels, routes, offline maps, and radio tools. Nokia 700 is the primary target. Version 0.2.17 displayed its interface on Nokia X7, C7, and E6 firmware in EKA2L1.
 
-[Symbian installation, features, and device compatibility (Russian)](apps/symbian/README.md)
+[Symbian installation, features, and device compatibility (Russian)](apps/symbian/README.md) · [Download the SIS test release](https://github.com/AVA55LV/ommesh/releases/tag/belle-v0.2.17)
 
 ![Ommesh desktop: mesh map, nearby nodes and repeater status](docs/screenshots/desktop-mesh.png)
 

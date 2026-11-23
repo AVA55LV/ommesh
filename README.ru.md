@@ -22,7 +22,7 @@
 
 Этот форк добавляет неофициальный нативный клиент MeshCore для Symbian Belle. Он подключается к MeshCore Companion Wi‑Fi по TCP. В порте есть личные чаты и каналы, история сообщений, карта сети и инструменты ноды. Целевая модель — Nokia 700. Интерфейс версии 0.2.17 открылся в EKA2L1 на Nokia X7, C7 и E6.
 
-[Установка, функции и совместимость OMMesh Belle](apps/symbian/README.md)
+[Установка, функции и совместимость OMMesh Belle](apps/symbian/README.md) · [Скачать тестовый SIS](https://github.com/AVA55LV/ommesh/releases/tag/belle-v0.2.17)
 
 ![Ommesh на компьютере: карта сети, список узлов и состояние ретранслятора](docs/screenshots/desktop-mesh.png)
 
