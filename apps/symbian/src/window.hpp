@@ -33,8 +33,9 @@ class QStackedWidget;
 class QToolButton;
 class QVBoxLayout;
 
-QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content);
-QListWidget* makeTouchList(QWidget* parent, int horizontalInset = 0);
+inline constexpr int SettingsPageInset = 12;
+QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content, bool overlayVerticalBar = false);
+QListWidget* makeTouchList(QWidget* parent, int horizontalInset = 0, bool overlayVerticalBar = false);
 QWidget* showCompactSheet(QWidget* owner, QWidget* content, const QString& title,
                           const char* closeSlot, const std::function<void()>& close);
 void dismissCompactSheet(QWidget* sheet, bool animate);

@@ -32,7 +32,6 @@ constexpr int MaximumHistoryBytes = 2 * 1024 * 1024;
 constexpr int MaximumHistoryMessages = 400;
 constexpr int MaximumReactions = 32;
 constexpr int MaximumStringBytes = 1024;
-constexpr int FilePickerInset = 14;
 
 QString ui(const char* text) { return QString::fromUtf8(text); }
 
@@ -488,7 +487,7 @@ SettingsBackupFilePicker::SettingsBackupFilePicker(bool exportFile, const QStrin
                                                    QWidget* parent, const QStringList& patterns)
     : QWidget(parent), exportFile_(exportFile),
       patterns_(patterns.isEmpty() ? QStringList(QLatin1String("*.omb")) : patterns),
-      entries_(makeTouchList(this, FilePickerInset)),
+      entries_(makeTouchList(this, SettingsPageInset, true)),
       path_(feedbackLabel(QString(), this)), empty_(feedbackLabel(QString(), this)),
       disks_(new QPushButton(ui("Диски"), this)), up_(new QPushButton(ui("Вверх"), this)),
       choose_(new QPushButton(exportFile ? ui("Сохранить сюда") : ui("Выбрать файл"), this)) {
@@ -504,7 +503,7 @@ SettingsBackupFilePicker::SettingsBackupFilePicker(bool exportFile, const QStrin
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(7);
     auto* heading = new QVBoxLayout;
-    heading->setContentsMargins(FilePickerInset, 0, FilePickerInset, 0);
+    heading->setContentsMargins(SettingsPageInset, 0, SettingsPageInset, 0);
     heading->setSpacing(7);
     heading->addWidget(path_);
     heading->addWidget(empty_);
@@ -522,7 +521,7 @@ SettingsBackupFilePicker::SettingsBackupFilePicker(bool exportFile, const QStrin
     for (QPushButton* button : {disks_, up_, cancelButton, choose_})
         button->setMinimumHeight(44);
     auto* footer = new QHBoxLayout;
-    footer->setContentsMargins(FilePickerInset, 0, FilePickerInset, 0);
+    footer->setContentsMargins(SettingsPageInset, 0, SettingsPageInset, 0);
     footer->setSpacing(7);
     footer->addWidget(cancelButton, 1);
     footer->addWidget(choose_, 1);

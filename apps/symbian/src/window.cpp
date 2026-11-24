@@ -9,6 +9,7 @@
 #include "node_chat_options.hpp"
 #include "node_map.hpp"
 #include "radio_settings.hpp"
+#include "scroll_viewport.hpp"
 #include "settings_icons.hpp"
 
 #include <QtCore/QBasicTimer>
@@ -269,14 +270,22 @@ QSet<QString> roomIds(const Client& client) {
 
 class TouchList : public QListWidget {
 public:
-    explicit TouchList(QWidget* parent, int horizontalInset = 0) : QListWidget(parent) {
+    TouchList(QWidget* parent, int horizontalInset, bool overlayVerticalBar)
+        : QListWidget(parent), viewportInsets_(horizontalInset, overlayVerticalBar) {
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
         setUniformItemSizes(true);
-        setViewportMargins(horizontalInset, 0, horizontalInset, 0);
+        setViewportMargins(viewportInsets_.left(), 0, viewportInsets_.right(), 0);
     }
 
 protected:
+    bool viewportEvent(QEvent* event) override {
+        const bool handled = QListWidget::viewportEvent(event);
+        if (event->type() == QEvent::Resize && viewportInsets_.update(*this))
+            setViewportMargins(viewportInsets_.left(), 0, viewportInsets_.right(), 0);
+        return handled;
+    }
+
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() != Qt::LeftButton) {
             QListWidget::mousePressEvent(event);
@@ -355,6 +364,7 @@ protected:
     }
 
 private:
+    ScrollViewportMargins viewportInsets_;
     QBasicTimer holdTimer_;
     QPoint press_;
     QString pressedId_;
@@ -403,8 +413,8 @@ protected:
 
 class TouchScrollArea : public QScrollArea {
 public:
-    explicit TouchScrollArea(QWidget* parent, bool overlayVerticalBar = false)
-        : QScrollArea(parent), overlayVerticalBar_(overlayVerticalBar) {
+    TouchScrollArea(QWidget* parent, bool overlayVerticalBar)
+        : QScrollArea(parent), viewportInsets_(0, overlayVerticalBar) {
         setWidgetResizable(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollBar(new TouchScrollBar(this));
@@ -418,16 +428,10 @@ public:
 
 protected:
     bool viewportEvent(QEvent* event) override {
-        if (overlayVerticalBar_ && event->type() == QEvent::Resize) {
-            QScrollBar* bar = verticalScrollBar();
-            const int overlap = bar->isVisibleTo(this) ? bar->sizeHint().width() : 0;
-            if (overlap != verticalBarOverlap_) {
-                // Qt raises the scrollbar above the viewport. Restore the width it reserved.
-                verticalBarOverlap_ = overlap;
-                setViewportMargins(0, 0, -overlap, 0);
-            }
-        }
-        return QScrollArea::viewportEvent(event);
+        const bool handled = QScrollArea::viewportEvent(event);
+        if (event->type() == QEvent::Resize && viewportInsets_.update(*this))
+            setViewportMargins(viewportInsets_.left(), 0, viewportInsets_.right(), 0);
+        return handled;
     }
 
     bool eventFilter(QObject* watched, QEvent* event) override {
@@ -520,10 +524,9 @@ private:
                 child->installEventFilter(this);
     }
 
+    ScrollViewportMargins viewportInsets_;
     QPointer<QAbstractButton> button_;
     QPoint previous_;
-    const bool overlayVerticalBar_;
-    int verticalBarOverlap_ = 0;
     bool pressed_ = false;
     bool dragging_ = false;
 };
@@ -646,7 +649,7 @@ private:
 };
 
 TouchList* makeList(QWidget* parent, const QString& name, int horizontalInset) {
-    TouchList* list = new TouchList(parent, horizontalInset);
+    auto* list = new TouchList(parent, horizontalInset, false);
     list->setProperty("accessibleName", name);
     list->setItemDelegate(new RowPainter(list));
     return list;
@@ -830,14 +833,14 @@ QString themeStyle(const Appearance::Palette& colors) {
 
 }  // namespace
 
-QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content) {
-    auto* scroll = new TouchScrollArea(parent);
+QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content, bool overlayVerticalBar) {
+    auto* scroll = new TouchScrollArea(parent, overlayVerticalBar);
     scroll->setContent(content);
     return scroll;
 }
 
-QListWidget* makeTouchList(QWidget* parent, int horizontalInset) {
-    return new TouchList(parent, horizontalInset);
+QListWidget* makeTouchList(QWidget* parent, int horizontalInset, bool overlayVerticalBar) {
+    return new TouchList(parent, horizontalInset, overlayVerticalBar);
 }
 
 namespace {
@@ -1457,7 +1460,7 @@ QWidget* ClientWindow::makeSettingsPage() {
     QWidget* page = surface(tabPages_, "pane");
     QVBoxLayout* layout = pageLayout(page);
     layout->setContentsMargins(0, 8, 0, 0);
-    auto* header = insetColumn(layout, 12);
+    auto* header = insetColumn(layout, SettingsPageInset);
     settingsReconnectBanner_ = surface(page, "settingsReconnectBanner");
     auto* bannerLayout = new QHBoxLayout(settingsReconnectBanner_);
     bannerLayout->setContentsMargins(9, 5, 6, 5);
@@ -1492,7 +1495,7 @@ QWidget* ClientWindow::makeSettingsPage() {
     settingsScroll_ = scroll;
     QWidget* content = surface(scroll, "pane");
     QVBoxLayout* settings = new QVBoxLayout(content);
-    settings->setContentsMargins(12, 0, 12, 15);
+    settings->setContentsMargins(SettingsPageInset, 0, SettingsPageInset, 15);
     settings->setSpacing(16);
 
     QWidget* card = surface(content, "nodeCard");
@@ -1573,7 +1576,7 @@ QWidget* ClientWindow::makeConnectionPage() {
     QVBoxLayout* layout = pageLayout(page);
     layout->setContentsMargins(0, 12, 0, 10);
     QHBoxLayout* heading = new QHBoxLayout;
-    heading->setContentsMargins(pageInset, 0, pageInset, 0);
+    heading->setContentsMargins(SettingsPageInset, 0, SettingsPageInset, 0);
     connectionBack_ = button(QString(), page);
     connectionBack_->setObjectName(QLatin1String("connectionBack"));
     connectionBack_->setProperty("accessibleName", ui("Назад"));
@@ -1585,7 +1588,7 @@ QWidget* ClientWindow::makeConnectionPage() {
     layout->addLayout(heading);
     QWidget* content = surface(page, "pane");
     auto* fields = new QVBoxLayout(content);
-    fields->setContentsMargins(pageInset, 0, pageInset + 2, 0);
+    fields->setContentsMargins(SettingsPageInset, 0, SettingsPageInset, 0);
     fields->setSpacing(8);
     status_ = label(QString(), content, "muted");
     status_->setWordWrap(true);
@@ -1625,7 +1628,7 @@ QWidget* ClientWindow::makeConnectionPage() {
     fields->addSpacing(8);
     fields->addWidget(radioSettings_->makeConnectionPreferences(content));
     fields->addStretch(1);
-    layout->addWidget(makeTouchScrollArea(page, content), 1);
+    layout->addWidget(makeTouchScrollArea(page, content, true), 1);
     connect(connectionBack_, SIGNAL(clicked()), this, SLOT(returnToDashboard()));
     connect(connectButton_, SIGNAL(clicked()), this, SLOT(scheduleConnection()));
     connect(port_, SIGNAL(returnPressed()), this, SLOT(scheduleConnection()));
@@ -1721,7 +1724,7 @@ void ClientWindow::applyNavigation() {
     if (action == Navigation::MapSettings) {
         MapSettingsPanel* settings = new MapSettingsPanel(this);
         connect(settings, SIGNAL(saved()), this, SLOT(mapSettingsSaved()));
-        QScrollArea* scroll = makeTouchScrollArea(this, settings);
+        QScrollArea* scroll = makeTouchScrollArea(this, settings, true);
         scroll->setObjectName(QLatin1String("mapSettingsScroll"));
         const QColor canvas = Appearance::paletteFor(this).canvas;
         for (QWidget* background : {scroll->widget(), scroll->viewport()}) {
@@ -1733,7 +1736,7 @@ void ClientWindow::applyNavigation() {
             background->setPalette(palette);
             background->setAutoFillBackground(true);
         }
-        showDetailPage(scroll, ui("Интернет-карта"));
+        showDetailPage(scroll, ui("Офлайн-карты"));
         return;
     }
     if (action == Navigation::NewChat) {
@@ -1812,9 +1815,10 @@ void ClientWindow::showPendingDetail(bool back) {
     }
     const bool reachesEdge = qobject_cast<QAbstractScrollArea*>(content) ||
                              content->property("detailScrollToEdge").toBool();
-    const int margin = reachesEdge ? 0 : pageInset;
+    const int inset = content->objectName() == QLatin1String("newChatView") ? pageInset : SettingsPageInset;
+    const int margin = reachesEdge ? 0 : inset;
     detailLayout_->setContentsMargins(margin, 12, margin, 10);
-    detailHeading_->setContentsMargins(pageInset - margin, 0, pageInset - margin, 0);
+    detailHeading_->setContentsMargins(inset - margin, 0, inset - margin, 0);
     if (detailContent_.data() != content) {
         QWidget* previous = takeDetail();
         if (previous) {
@@ -1827,9 +1831,13 @@ void ClientWindow::showPendingDetail(bool back) {
             if (QWidget* body = scroll->widget()) {
                 // Insets belong inside the scrolling widget once it reaches the screen edge.
                 if (!scroll->property("detailScrollToEdge").toBool()) {
-                    const QMargins padding = body->contentsMargins();
-                    body->setContentsMargins(padding.left() + pageInset, padding.top(),
-                                             padding.right() + pageInset, padding.bottom());
+                    if (QLayout* bodyLayout = body->layout()) {
+                        const QMargins padding = bodyLayout->contentsMargins();
+                        bodyLayout->setContentsMargins(inset, padding.top(), inset, padding.bottom());
+                    } else {
+                        const QMargins padding = body->contentsMargins();
+                        body->setContentsMargins(inset, padding.top(), inset, padding.bottom());
+                    }
                     scroll->setProperty("detailScrollToEdge", true);
                 }
             }

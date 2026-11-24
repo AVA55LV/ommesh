@@ -2,44 +2,32 @@
 #include "appearance.hpp"
 #include "client.hpp"
 #include "emoji_line.hpp"
-#include "local_tile_proxy.hpp"
-#include "native_tile_https.hpp"
 #include "settings_icons.hpp"
 
-#include <QtCore/QCache>
 #include <QtCore/QCoreApplication>
 #include <QtCore/QDataStream>
-#include <QtCore/QDateTime>
 #include <QtCore/QDir>
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QFile>
-#include <QtCore/QLocale>
+#include <QtCore/QHash>
 #include <QtCore/QSet>
 #include <QtCore/QSettings>
 #include <QtCore/QStringList>
 #include <QtCore/QTimer>
-#include <QtCore/QUrl>
 #include <QtGui/QButtonGroup>
-#include <QtGui/QDesktopServices>
 #include <QtGui/QGridLayout>
-#include <QtGui/QImage>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QLabel>
 #include <QtGui/QMenu>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
+#include <QtGui/QPolygon>
 #include <QtGui/QPushButton>
 #include <QtGui/QToolButton>
 #include <QtGui/QVBoxLayout>
-#include <QtNetwork/QNetworkAccessManager>
-#include <QtNetwork/QNetworkDiskCache>
-#include <QtNetwork/QNetworkProxy>
-#include <QtNetwork/QNetworkReply>
-#include <QtNetwork/QNetworkRequest>
 
 #include <algorithm>
 #include <cmath>
-#include <memory>
 
 namespace {
 
@@ -58,10 +46,12 @@ const int RoadLevels[] = {11, 1, 11, 12, 10, 1};
 const int AtlasFeatureKinds = sizeof(AtlasColors) / sizeof(AtlasColors[0]);
 const int AtlasVertexLimit = 48000;
 const int TileSide = 256;
-const int MaximumTileBytes = 160 * 1024;
-const int MaximumOnlineZoom = 17;
 const int MinimumOfflineScaleMeters = 200;
-const int MinimumOnlineZoom = 1;
+const int OmskOverviewMeters = 30000;
+const int OmskDetailMeters = 30;
+const int OmskOverviewZoom = 7;
+const int OmskDetailZoom = 17;
+const int OmskOverlayZoom = 14;
 const int CameraDuration = 165;
 const int CameraFrame = 26;
 const int EmptyX = 73375000;
@@ -73,15 +63,6 @@ const double EarthCircumferenceMeters = 40030230.0;
 
 QString ru(const char* text) { return QString::fromUtf8(text); }
 QColor color(QRgb rgb) { return QColor::fromRgb(rgb); }
-
-TileProvider providerFromPreference(int value) {
-    return value == static_cast<int>(TileProvider::OpenTopoMapR)
-        ? TileProvider::OpenTopoMapR : TileProvider::OpenStreetMap;
-}
-
-QString providerName(TileProvider provider) {
-    return QString::fromLatin1(provider == TileProvider::OpenTopoMapR ? "OpenTopoMap-R" : "OpenStreetMap");
-}
 
 QPointF project(qint32 latitude, qint32 longitude) {
     const double degrees = std::max(-MaxLatitude, std::min(MaxLatitude, latitude / 1000000.0));
@@ -346,115 +327,167 @@ private:
     int control_;
 };
 
-struct TilePlacement {
-    int zoom;
-    int x;
-    int y;
-    QRect rect;
-
-    QString path() const {
-        return QString::fromLatin1("%1/%2/%3.png").arg(zoom).arg(x).arg(y);
-    }
-};
-
-struct CachedImage {
-    QImage image;
-    QDateTime expires;
-    bool transient;
-};
-
-QString cachePath() {
-    QString location = QDesktopServices::storageLocation(QDesktopServices::CacheLocation);
-    if (location.isEmpty()) {
-        location = QDir::tempPath() + QString::fromLatin1("/OMMeshBelle");
-    }
-    return location + QString::fromLatin1("/tiles");
-}
-
-quint32 bigEndian(const QByteArray& data, int offset) {
-    const unsigned char* bytes = reinterpret_cast<const unsigned char*>(data.constData() + offset);
-    return quint32(bytes[0]) << 24 | quint32(bytes[1]) << 16 | quint32(bytes[2]) << 8 | quint32(bytes[3]);
-}
-
-QImage decodeTile(const QByteArray& data) {
-    if (data.size() < 33 || data.size() > MaximumTileBytes || bigEndian(data, 0) != 0x89504e47u
-        || bigEndian(data, 4) != 0x0d0a1a0au || bigEndian(data, 8) != 13
-        || bigEndian(data, 12) != 0x49484452u || bigEndian(data, 16) != TileSide
-        || bigEndian(data, 20) != TileSide) {
-        return QImage();
-    }
-    const QImage decoded = QImage::fromData(data, "PNG");
-    return decoded.width() == TileSide && decoded.height() == TileSide ? decoded : QImage();
-}
-
-QByteArray headerValue(const QNetworkCacheMetaData::RawHeaderList& headers, const char* name) {
-    for (int i = 0; i < headers.size(); ++i) {
-        if (headers.at(i).first.toLower() == name) {
-            return headers.at(i).second;
-        }
-    }
-    return QByteArray();
-}
-
-QDateTime tileExpiry(const QNetworkCacheMetaData::RawHeaderList& headers, const QDateTime& now) {
-    const QByteArray control = headerValue(headers, "cache-control").toLower();
-    if (control.contains("no-cache") || control.contains("no-store")) {
-        return now;
-    }
-    const QList<QByteArray> directives = control.split(',');
-    for (int i = 0; i < directives.size(); ++i) {
-        const QByteArray directive = directives.at(i).trimmed();
-        const int equals = directive.indexOf('=');
-        if (equals < 0 || directive.left(equals).trimmed() != "max-age") {
-            continue;
-        }
-        QByteArray value = directive.mid(equals + 1).trimmed();
-        if (value.size() > 1 && value.startsWith('"') && value.endsWith('"')) {
-            value = value.mid(1, value.size() - 2);
-        }
-        bool valid = false;
-        const qint64 seconds = value.toLongLong(&valid);
-        if (valid) {
-            const qint64 age = qMax<qint64>(0, headerValue(headers, "age").toLongLong());
-            const qint64 maxAge = qBound<qint64>(0, seconds, 31536000);
-            return now.addSecs(static_cast<int>(qMax<qint64>(0, maxAge - age)));
-        }
-    }
-    const QByteArray expires = headerValue(headers, "expires");
-    if (!expires.isEmpty()) {
-        const QString field = QString::fromLatin1(expires.constData(), expires.size());
-        const QString pattern = QString::fromLatin1("ddd, dd MMM yyyy HH:mm:ss 'GMT'");
-        QDateTime parsed = QLocale::c().toDateTime(field, pattern);
-        if (parsed.isValid()) {
-            parsed.setTimeSpec(Qt::UTC);
-            return parsed;
-        }
-    }
-    return now.addDays(7);
-}
-
 bool intersects(const QRectF& lhs, const QRectF& rhs) {
     return lhs.left() <= rhs.right() && lhs.right() >= rhs.left()
         && lhs.top() <= rhs.bottom() && lhs.bottom() >= rhs.top();
 }
 
+// OMD1 stores an index of independent, compressed Mercator sectors.
+class CityDetail {
+public:
+    static constexpr int SectorZoom = 14;
+    static constexpr int LocalBits = 11;
+    static constexpr int GridSize = 1 << SectorZoom;
+    static constexpr int Units = 1 << LocalBits;
+    static constexpr int MaxRawBytes = 128 * 1024;
+
+    struct Feature {
+        int kind;
+        QPolygon points;
+        QRect bounds;
+    };
+
+    using Sector = QVector<Feature>;
+    using Sectors = QHash<quint32, Sector>;
+
+    void prepare(const QRectF& view) {
+        if (!opened_) {
+            opened_ = true;
+            openIndex();
+        }
+        if (index_.isEmpty())
+            return;
+        const int left = qBound(0, int(std::floor(view.left() * GridSize)), GridSize - 1);
+        const int right = qBound(0, int(std::floor(view.right() * GridSize)), GridSize - 1);
+        const int top = qBound(0, int(std::floor(view.top() * GridSize)), GridSize - 1);
+        const int bottom = qBound(0, int(std::floor(view.bottom() * GridSize)), GridSize - 1);
+        Sectors visible;
+        // The detail zoom keeps a normal 360×640 screen within a few sectors.
+        if (right - left <= 4 && bottom - top <= 4) {
+            for (int y = top; y <= bottom; ++y) {
+                for (int x = left; x <= right; ++x) {
+                    const quint32 key = (quint32(x) << 16) | quint32(y);
+                    const auto cached = sectors.constFind(key);
+                    if (cached != sectors.constEnd()) {
+                        visible.insert(key, cached.value());
+                    } else {
+                        const auto entry = index_.constFind(key);
+                        if (entry != index_.constEnd())
+                            visible.insert(key, readSector(entry.value()));
+                    }
+                }
+            }
+        }
+        sectors.swap(visible);
+    }
+
+    Sectors sectors;
+
+private:
+    struct Entry { quint32 offset, length; };
+
+    void openIndex() {
+        file_.setFileName(QLatin1String(":/maps/omsk-detail.bin"));
+        if (!file_.open(QIODevice::ReadOnly))
+            return;
+        const qint64 size = file_.size();
+        QDataStream input(&file_);
+        quint32 magic = 0;
+        quint8 zoom = 0, bits = 0;
+        quint16 count = 0;
+        input >> magic >> zoom >> bits >> count;
+        const qint64 recordsEnd = 8 + 12 * count;
+        if (input.status() != QDataStream::Ok || magic != 0x4f4d4431u ||
+                zoom != SectorZoom || bits != LocalBits || count > 4096 || recordsEnd > size) {
+            return;
+        }
+        QHash<quint32, Entry> entries;
+        for (int i = 0; i < count; ++i) {
+            quint16 x = 0, y = 0;
+            Entry entry = {};
+            input >> x >> y >> entry.offset >> entry.length;
+            const quint32 key = (quint32(x) << 16) | y;
+            if (input.status() != QDataStream::Ok || x >= GridSize || y >= GridSize ||
+                    entry.offset < recordsEnd || entry.length < 5 || entry.length > MaxRawBytes + 1024 ||
+                    qint64(entry.offset) + entry.length > size || entries.contains(key)) {
+                return;
+            }
+            entries.insert(key, entry);
+        }
+        index_.swap(entries);
+    }
+
+    static bool readVarint(const QByteArray& data, int& cursor, int& value) {
+        value = 0;
+        for (int shift = 0; shift < 21 && cursor < data.size(); shift += 7) {
+            const unsigned byte = quint8(data.at(cursor++));
+            value |= (byte & 127) << shift;
+            if (!(byte & 128))
+                return true;
+        }
+        return false;
+    }
+
+    Sector readSector(const Entry& entry) {
+        if (!file_.seek(entry.offset))
+            return Sector();
+        const QByteArray compressed = file_.read(entry.length);
+        if (compressed.size() != int(entry.length))
+            return Sector();
+        quint32 rawSize = 0;
+        for (int i = 0; i < 4; ++i)
+            rawSize = (rawSize << 8) | quint8(compressed.at(i));
+        if (rawSize < 2 || rawSize > MaxRawBytes)
+            return Sector();
+        const QByteArray data = qUncompress(compressed);
+        if (data.size() != int(rawSize))
+            return Sector();
+        const int count = (quint8(data.at(0)) << 8) | quint8(data.at(1));
+        if (count > 4096)
+            return Sector();
+        Sector result;
+        result.reserve(count);
+        int cursor = 2;
+        QPoint previousFirst;
+        for (int i = 0; i < count; ++i) {
+            if (cursor >= data.size())
+                return Sector();
+            const int kind = quint8(data.at(cursor++));
+            int points;
+            if (kind > 2 || !readVarint(data, cursor, points) || points < (kind == 0 ? 3 : 2) || points > 512)
+                return Sector();
+            Feature feature = {kind, QPolygon(), QRect()};
+            feature.points.reserve(points);
+            QPoint point = previousFirst;
+            for (int j = 0; j < points; ++j) {
+                int dx, dy;
+                if (!readVarint(data, cursor, dx) || !readVarint(data, cursor, dy))
+                    return Sector();
+                point += QPoint((dx >> 1) ^ -(dx & 1), (dy >> 1) ^ -(dy & 1));
+                if (point.x() < -32768 || point.x() > 32767 || point.y() < -32768 || point.y() > 32767)
+                    return Sector();
+                if (j == 0)
+                    previousFirst = point;
+                feature.points.append(point);
+            }
+            feature.bounds = feature.points.boundingRect();
+            result.append(feature);
+        }
+        return cursor == data.size() ? result : Sector();
+    }
+
+    bool opened_ = false;
+    QFile file_;
+    QHash<quint32, Entry> index_;
+};
+
 }  // namespace
 
 struct NodeMap::State {
-    explicit State(NodeMap* owner)
-        : owner(owner), memory(16 * TileSide * TileSide * 4), center(project(EmptyY, EmptyX)) {
-        settle.setSingleShot(true);
-        deadline.setSingleShot(true);
-    }
+    explicit State(NodeMap* owner) : owner(owner), center(project(EmptyY, EmptyX)) {}
 
     NodeMap* owner;
-    QNetworkAccessManager* network = nullptr;
-    QNetworkDiskCache* disk = nullptr;
-    std::unique_ptr<LocalTileProxy> localProxy;
     std::function<void(const char*, int)> trace;
-    QCache<QString, CachedImage> memory;
-    QTimer settle;
-    QTimer deadline;
     QTimer camera;
     QElapsedTimer cameraClock;
     QPointF cameraFrom;
@@ -462,26 +495,16 @@ struct NodeMap::State {
     double cameraScale = 0.0;
     double cameraFromScale = 0.0;
     int cameraZoom = 8;
-    QNetworkReply* reply = nullptr;
-    QUrl replyCacheUrl;
-    QString replyKey;
-    QByteArray received;
-    QString requestError;
-    QSet<QString> attempted;
-    QSet<QString> visibleKeys;
-    Source source = Offline;
-    TileProvider provider = TileProvider::OpenStreetMap;
-    QString issue;
     bool worldTried = false;
-    bool firstTile = true;
     OfflineRegion region = OmskCity;
     OfflineRegion detailRegion = World;
+    const QRectF omskBounds = regionBounds(OmskCity);
     Atlas world;
     Atlas detail;
+    CityDetail cityDetail;
     QSet<int> missingAtlases;
     QVector<Pin> pins;
     QVector<QPair<QRect, QString>> pinLabels;
-    QVector<QPair<QRect, QUrl>> attributionLinks;
     Pin self;
     QString focused;
     int nodeCount = 0;
@@ -523,24 +546,8 @@ struct NodeMap::State {
         return field;
     }
 
-    QRect hintRect() const {
-        const QRect field = openMapRect();
-        return QRect(field.left() + 9, qMax(field.top() + 28, field.bottom() - 70),
-                     qMax(1, field.width() - 18), 35);
-    }
-
-    QRect retryRect() const {
-        const QRect area = hintRect();
-        return QRect(area.left(), area.top(), qMax(1, area.width() / 2 - 2), area.height());
-    }
-
-    QRect settingsRect() const {
-        const QRect area = hintRect();
-        return area.adjusted(area.width() / 2 + 2, 0, 0, 0);
-    }
-
     static double zoomScale(int level) { return static_cast<double>(TileSide << level); }
-    double scale() const { return cameraScale > 0.0 ? cameraScale : zoomScale(zoom); }
+    double scale() const { return cameraScale > 0.0 ? cameraScale : viewScale(zoom, center); }
     QPoint mapAnchor() const { return openMapRect().center(); }
 
     QPointF screen(const QPointF& world) const {
@@ -608,7 +615,7 @@ struct NodeMap::State {
             loadAtlas(World, world);
         }
         OfflineRegion wanted = World;
-        if (zoom >= 8 && canSee(OmskCity) && !missingAtlases.contains(OmskCity)) {
+        if (zoom >= OmskOverviewZoom && canSee(OmskCity) && !missingAtlases.contains(OmskCity)) {
             wanted = OmskCity;
         } else if (zoom >= 5 && canSee(OmskOblast) && !missingAtlases.contains(OmskOblast)) {
             wanted = OmskOblast;
@@ -622,23 +629,41 @@ struct NodeMap::State {
                 detailRegion = wanted;
             }
         }
+        if (zoom >= OmskOverlayZoom && detailRegion == OmskCity)
+            cityDetail.prepare(QRectF(areaTopLeft(mapRect(), 0), areaBottomRight(mapRect(), 0)));
+        else
+            cityDetail.sectors.clear();
     }
 
-    int minimumZoom() const { return source == Offline ? 0 : MinimumOnlineZoom; }
     int scaleBarWidth() const { return qMin(64, qMax(22, mapRect().width() / 4)); }
 
     static double worldWidthMeters(const QPointF& position) {
         return EarthCircumferenceMeters / std::cosh((0.5 - position.y()) * 2 * Pi);
     }
 
+    bool omskView(const QPointF& position) const {
+        return region == OmskCity && omskBounds.contains(position);
+    }
+
+    double viewScale(int level, const QPointF& position) const {
+        if (omskView(position)) {
+            const double bar = scaleBarWidth() * worldWidthMeters(position);
+            if (level == OmskOverviewZoom)
+                return bar / OmskOverviewMeters;
+            if (level == OmskDetailZoom)
+                return bar / OmskDetailMeters;
+        }
+        return zoomScale(level);
+    }
+
     double offlineScaleLimit(const QPointF& position) const {
-        // Fit at least 200 m in the scale bar at the center latitude.
-        return scaleBarWidth() * worldWidthMeters(position) / MinimumOfflineScaleMeters;
+        return scaleBarWidth() * worldWidthMeters(position) /
+            (omskView(position) ? OmskDetailMeters : MinimumOfflineScaleMeters);
     }
 
     int maximumZoom(const QPointF& position) const {
-        if (source != Offline)
-            return MaximumOnlineZoom;
+        if (omskView(position))
+            return OmskDetailZoom;
         const double limit = offlineScaleLimit(position);
         int level = 0;
         while (zoomScale(level + 1) <= limit)
@@ -647,13 +672,27 @@ struct NodeMap::State {
     }
 
     int boundedZoom(int level, const QPointF& position) const {
-        return qBound(minimumZoom(), level, maximumZoom(position));
+        return qBound(0, level, maximumZoom(position));
+    }
+
+    int scaleBarDistance() const {
+        if (!camera.isActive() && omskView(center)) {
+            if (zoom == OmskOverviewZoom)
+                return OmskOverviewMeters;
+            if (zoom == OmskDetailZoom)
+                return OmskDetailMeters;
+        }
+        const double available = scaleBarWidth() * worldWidthMeters(center) / scale();
+        double unit = 1.0;
+        while (unit * 10 <= available)
+            unit *= 10;
+        return static_cast<int>((available >= unit * 5 ? 5 : available >= unit * 2 ? 2 : 1) * unit);
     }
 
     QPair<QPointF, int> fittedView() const {
         QRectF regionBox = regionBounds(region);
         bool frameRegion = framing == SavedRegion;
-        if (!frameRegion && framing == Automatic && source == Offline) {
+        if (!frameRegion && framing == Automatic) {
             frameRegion = region != OmskCity;
             for (int i = 0; i < pins.size() && !frameRegion; ++i) {
                 if (!regionBox.contains(pins.at(i).position)) {
@@ -661,6 +700,8 @@ struct NodeMap::State {
                 }
             }
         }
+        if (region == OmskCity && (frameRegion || pins.isEmpty()))
+            return qMakePair(regionBox.center(), OmskOverviewZoom);
         if (!frameRegion && !pins.isEmpty()) {
             const QPointF first = pins.first().position;
             double left = first.x(), right = first.x(), top = first.y(), bottom = first.y();
@@ -680,9 +721,9 @@ struct NodeMap::State {
         const double minimumSpan = 0.000095;
         const double limit = qMin(qMax(1, map.width() - 36) / std::max(minimumSpan, static_cast<double>(regionBox.width())),
                                   qMax(1, map.height() - 48) / std::max(minimumSpan, static_cast<double>(regionBox.height())));
-        int level = minimumZoom();
+        int level = 0;
         const int maxLevel = maximumZoom(target);
-        while (level < maxLevel && zoomScale(level + 1) <= limit) {
+        while (level < maxLevel && viewScale(level + 1, target) <= limit) {
             ++level;
         }
         return qMakePair(target, level);
@@ -695,122 +736,9 @@ struct NodeMap::State {
         zoom = view.second;
     }
 
-    QVector<TilePlacement> tiles() const {
-        const QRect map = mapRect();
-        QVector<TilePlacement> result;
-        if (map.width() <= 0) {
-            return result;
-        }
-        const QPoint midpoint = mapAnchor();
-        const double tileScale = zoomScale(zoom);
-        const double ratio = scale() / tileScale;
-        const double globalX = std::floor(center.x() * tileScale - (midpoint.x() - map.left()) / ratio);
-        const double globalY = std::floor(center.y() * tileScale - (midpoint.y() - map.top()) / ratio);
-        const int mask = (1 << zoom) - 1;
-        int left = static_cast<int>(std::floor(globalX / 256.0));
-        int right = static_cast<int>(std::floor((globalX + (map.width() - 1) / ratio) / TileSide));
-        int top = qMax(0, static_cast<int>(std::floor(globalY / TileSide)));
-        int bottom = qMin(mask, static_cast<int>(std::floor((globalY + (map.height() - 1) / ratio) / TileSide)));
-        // The 640px phone screen needs at most four tiles along either axis.
-        // At a fractional zoom, old cached tiles are only used while animating.
-        const int limit = camera.isActive() ? 6 : 4;
-        if (right - left >= limit) {
-            left = (left + right) / 2 - 1;
-            right = left + limit - 1;
-        }
-        if (bottom - top >= limit) {
-            top = (top + bottom) / 2 - 1;
-            bottom = qMin(mask, top + limit - 1);
-        }
-        for (int y = top; y <= bottom; ++y) {
-            for (int x = left; x <= right; ++x) {
-                const int pixelX = qRound((x * TileSide - globalX) * ratio);
-                const int pixelY = qRound((y * TileSide - globalY) * ratio);
-                const int tileWidth = qRound(((x + 1) * TileSide - globalX) * ratio) - pixelX;
-                const int tileHeight = qRound(((y + 1) * TileSide - globalY) * ratio) - pixelY;
-                TilePlacement tile = {zoom, x & mask, y, QRect(map.left() + pixelX, map.top() + pixelY,
-                                                             tileWidth, tileHeight)};
-                if (tile.rect.intersects(map)) {
-                    result.append(tile);
-                }
-            }
-        }
-        return result;
-    }
-
-    bool fullyDrawn(const QVector<TilePlacement>& tiles) const {
-        if (tiles.isEmpty() || source == Offline) {
-            return false;
-        }
-        for (int i = 0; i < tiles.size(); ++i) {
-            if (!memory.contains(tiles.at(i).path())) {
-                return false;
-            }
-        }
-        return true;
-    }
-
-    QString status(bool complete) const {
-        if (!issue.isEmpty()) {
-            return issue;
-        }
-        if (source == Offline) {
-            return worldTried && world.bounds.isEmpty() && detail.bounds.isEmpty()
-                ? ru("Офлайн: подложка недоступна")
-                : ru("Офлайн · узлы %1/%2").arg(pins.size()).arg(nodeCount);
-        }
-        const QString name = provider == TileProvider::OpenTopoMapR ? providerName(provider) : QLatin1String("OSM");
-        return (complete ? ru("%1 · на телефоне · готово") : ru("%1 · на телефоне · загрузка")).arg(name);
-    }
-
-    void schedule() {
-        if (source == Offline || !owner->isVisible() || camera.isActive()) {
-            return;
-        }
-        QSet<QString> nextVisible;
-        const QVector<TilePlacement> placements = tiles();
-        for (int i = 0; i < placements.size(); ++i) {
-            nextVisible.insert(placements.at(i).path());
-        }
-        if (nextVisible != visibleKeys) {
-            attempted.intersect(nextVisible);
-            const QList<QString> keys = memory.keys();
-            const QDateTime now = QDateTime::currentDateTimeUtc();
-            for (int i = 0; i < keys.size(); ++i) {
-                const QString& key = keys.at(i);
-                const CachedImage* tile = memory.object(key);
-                if (!nextVisible.contains(key) && (tile->transient || tile->expires <= now)) {
-                    memory.remove(key);
-                }
-            }
-            visibleKeys = nextVisible;
-        }
-        settle.start(200);
-    }
-
-    void cancel() {
-        settle.stop();
-        deadline.stop();
-        if (reply) {
-            QNetworkReply* old = reply;
-            reply = nullptr;
-            old->disconnect(owner);
-            // Destroy the old reply outside the input/network callback stack.
-            old->deleteLater();
-        }
-        received.clear();
-        requestError.clear();
-    }
-
-    void clearIssue() {
-        issue.clear();
-        attempted.clear();
-    }
-
     void updateView() {
         prepareAtlases();
         owner->update();
-        schedule();
     }
 
     void stopCamera() {
@@ -829,7 +757,7 @@ struct NodeMap::State {
         level = boundedZoom(level, target);
         target.setX(nearX(target.x(), center.x()));
         const double currentScale = scale();
-        const double targetScale = zoomScale(level);
+        const double targetScale = viewScale(level, target);
         const double distance = (target - center).manhattanLength() * qMin(currentScale, targetScale);
         if (!owner->isVisible() || qAbs(level - zoom) > 1 ||
             distance > 2 * qMax(owner->width(), owner->height()) ||
@@ -841,7 +769,6 @@ struct NodeMap::State {
         cameraTo = target;
         cameraScale = cameraFromScale = currentScale;
         cameraZoom = level;
-        settle.stop();
         cameraClock.start();
         camera.start(CameraFrame);
     }
@@ -856,9 +783,8 @@ struct NodeMap::State {
         const double eased = 1.0 - remaining * remaining * remaining;
         center = cameraFrom + (cameraTo - cameraFrom) * eased;
         center.setX(wrapped(center.x()));
-        cameraScale = cameraFromScale + (zoomScale(cameraZoom) - cameraFromScale) * eased;
-        if (source == Offline)
-            cameraScale = qMin(cameraScale, offlineScaleLimit(center));
+        cameraScale = cameraFromScale + (viewScale(cameraZoom, cameraTo) - cameraFromScale) * eased;
+        cameraScale = qMin(cameraScale, offlineScaleLimit(center));
         owner->update();
     }
 
@@ -869,7 +795,9 @@ struct NodeMap::State {
 
     void adjustZoom(int delta) {
         framing = Manual;
-        moveCamera(center, (camera.isActive() ? cameraZoom : zoom) + delta);
+        const int current = camera.isActive() ? cameraZoom : zoom;
+        const int minimum = current >= OmskOverviewZoom && omskView(center) ? OmskOverviewZoom : 0;
+        moveCamera(center, qMax(minimum, current + delta));
     }
 
     void pan(const QPoint& pixels) {
@@ -882,13 +810,8 @@ struct NodeMap::State {
     }
 
     void overview() {
-        if (!issue.isEmpty()) {
-            clearIssue();
-            updateView();
-        } else {
-            framing = Markers;
-            moveToFit();
-        }
+        framing = Markers;
+        moveToFit();
     }
 
     void showRegion() {
@@ -903,74 +826,6 @@ struct NodeMap::State {
         }
         framing = Manual;
         moveCamera(self.position, camera.isActive() ? cameraZoom : zoom);
-    }
-
-    bool prepareLoopback() {
-        if (!localProxy)
-            localProxy = std::make_unique<LocalTileProxy>();
-        if (!localProxy->running()) {
-            QString error;
-            if (!localProxy->start(provider, provider == TileProvider::OpenStreetMap, &error)) {
-                issue = error.isEmpty() ? ru("Не удалось открыть localhost") : error;
-                return false;
-            }
-            mark("map: localhost relay ready");
-        }
-        return true;
-    }
-
-    void stopLoopback() {
-        if (source != Loopback || !localProxy)
-            return;
-        localProxy->stop();
-    }
-
-    void prepareNetwork() {
-        if (!network) {
-            mark("map: create network manager");
-            network = new QNetworkAccessManager(owner);
-            // The tile server only listens on the phone's loopback interface.
-            network->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
-            mark("map: setup tile cache");
-            disk = new QNetworkDiskCache(owner);
-            disk->setCacheDirectory(cachePath());
-            disk->setMaximumCacheSize(3 * 1024 * 1024);
-            mark("map: network and cache ready");
-        }
-    }
-
-    QByteArray stored(const QUrl& url) {
-        QIODevice* input = disk->data(url);
-        if (!input) {
-            return QByteArray();
-        }
-        const QByteArray data = input->read(MaximumTileBytes + 1);
-        delete input;
-        return data;
-    }
-
-    void save(const QUrl& url, const QByteArray& data, const QDateTime& expires,
-              const QNetworkCacheMetaData::RawHeaderList& headers) {
-        QNetworkCacheMetaData metadata;
-        metadata.setUrl(url);
-        metadata.setRawHeaders(headers);
-        metadata.setExpirationDate(expires);
-        metadata.setSaveToDisk(true);
-        QIODevice* entry = disk->prepare(metadata);
-        if (entry) {
-            if (entry->write(data) == data.size()) {
-                disk->insert(entry);
-            } else {
-                disk->remove(url);
-            }
-        }
-    }
-
-    void hold(const QString& key, const QImage& image, const QDateTime& expires, bool transient) {
-        if (!transient || visibleKeys.contains(key)) {
-            CachedImage* tile = new CachedImage{image, expires, transient};
-            memory.insert(key, tile, TileSide * TileSide * 4);
-        }
     }
 
     void grid(QPainter& painter, const QRect& map) const {
@@ -1007,7 +862,7 @@ struct NodeMap::State {
             painter.scale(scale(), scale());
             painter.translate(offset - center.x(), -center.y());
             if (kind == World || kind == OmskCity || kind == OmskOblast || world.bounds.isEmpty()) {
-                painter.fillRect(atlas.bounds, color(AtlasBackground));
+                painter.fillRect(atlas.bounds.intersected(visible), color(AtlasBackground));
             }
             for (int i = 0; i < atlas.lines.size(); ++i) {
                 const AtlasLine& line = atlas.lines.at(i);
@@ -1030,6 +885,44 @@ struct NodeMap::State {
             drawNames(painter, map, atlas, kind);
         }
         return drawn;
+    }
+
+    void drawCityDetail(QPainter& painter, const QRect& map) const {
+        const double sectorSize = scale() / CityDetail::GridSize;
+        const double pixel = sectorSize / CityDetail::Units;
+        for (auto sector = cityDetail.sectors.constBegin(); sector != cityDetail.sectors.constEnd(); ++sector) {
+            const QPointF origin = screen(QPointF(double(sector.key() >> 16) / CityDetail::GridSize,
+                                                   double(sector.key() & 65535) / CityDetail::GridSize));
+            const QRectF box(origin, QSizeF(sectorSize, sectorSize));
+            if (sector.value().isEmpty() || !box.intersects(QRectF(map)))
+                continue;
+            const QRectF localView((map.left() - origin.x()) / pixel, (map.top() - origin.y()) / pixel,
+                                   map.width() / pixel, map.height() / pixel);
+            painter.save();
+            painter.setClipRect(box, Qt::IntersectClip);
+            painter.translate(origin);
+            painter.scale(pixel, pixel);
+            int style = -1;
+            for (const CityDetail::Feature& feature : sector.value()) {
+                if ((feature.kind == 0 && zoom < 15) || (feature.kind == 2 && zoom < 16) ||
+                        !intersects(localView, QRectF(feature.bounds))) {
+                    continue;
+                }
+                if (style != feature.kind) {
+                    static const QRgb ink[] = {0x5e6e70, 0x6d7068, 0x536360};
+                    style = feature.kind;
+                    QPen pen(color(ink[style]));
+                    pen.setCosmetic(true);
+                    painter.setPen(pen);
+                    painter.setBrush(style == 0 ? QBrush(color(0x38474a)) : Qt::NoBrush);
+                }
+                if (style == 0)
+                    painter.drawPolygon(feature.points);
+                else
+                    painter.drawPolyline(feature.points);
+            }
+            painter.restore();
+        }
     }
 
     void drawNames(QPainter& painter, const QRect& map, const Atlas& atlas, OfflineRegion layer) const {
@@ -1068,19 +961,6 @@ struct NodeMap::State {
             painter.setPen(color(Paper));
             painter.drawText(label, Qt::AlignCenter, name);
             painter.fillRect(QRect(position.x(), position.y(), 2, 2), color(Muted));
-        }
-    }
-
-    void drawTiles(QPainter& painter, const QVector<TilePlacement>& placements) const {
-        for (int i = 0; i < placements.size(); ++i) {
-            const TilePlacement& tile = placements.at(i);
-            const CachedImage* image = memory.object(tile.path());
-            if (image) {
-                if (tile.rect.size() == image->image.size())
-                    painter.drawImage(tile.rect.topLeft(), image->image);
-                else
-                    painter.drawImage(tile.rect, image->image);
-            }
         }
     }
 
@@ -1196,48 +1076,14 @@ NodeMap::NodeMap(QWidget* parent) : QWidget(parent), state_(new State(this)) {
     state_->placeControls();
     connect(controls, SIGNAL(buttonClicked(int)), this, SLOT(activateControl(int)), Qt::QueuedConnection);
     connect(&state_->camera, SIGNAL(timeout()), this, SLOT(advanceCamera()));
-    connect(&state_->settle, SIGNAL(timeout()), this, SLOT(loadVisibleTiles()));
-    connect(&state_->deadline, SIGNAL(timeout()), this, SLOT(tileTimedOut()));
 }
 
 NodeMap::~NodeMap() {
-    state_->cancel();
     delete state_;
 }
 
 void NodeMap::setTrace(const std::function<void(const char*, int)>& trace) {
     state_->trace = trace;
-}
-
-NodeMap::Source NodeMap::sourceFromPreference(int value) {
-    return value == 1 || value == Loopback ? Loopback : Offline;
-}
-
-void NodeMap::setSource(Source source) {
-    State& s = *state_;
-    const TileProvider provider = source == Loopback
-        ? providerFromPreference(QSettings().value(QLatin1String("map/provider"), 0).toInt())
-        : TileProvider::OpenStreetMap;
-    if (s.source == source && s.provider == provider) {
-        return;
-    }
-    s.mark("map: apply source", static_cast<int>(source));
-    s.stopCamera();
-    s.cancel();
-    s.stopLoopback();
-    s.firstTile = true;
-    s.memory.clear();
-    s.visibleKeys.clear();
-    s.attributionLinks.clear();
-    s.clearIssue();
-    s.source = source;
-    s.provider = provider;
-    if (s.framing != State::Manual) {
-        s.fit();
-    } else {
-        s.zoom = s.boundedZoom(s.zoom, s.center);
-    }
-    s.updateView();
 }
 
 void NodeMap::setOfflineRegion(OfflineRegion region) {
@@ -1327,7 +1173,6 @@ void NodeMap::resizeEvent(QResizeEvent* event) {
         state_->zoom = state_->boundedZoom(state_->zoom, state_->center);
     }
     state_->prepareAtlases();
-    state_->schedule();
 }
 
 void NodeMap::showEvent(QShowEvent* event) {
@@ -1338,7 +1183,6 @@ void NodeMap::showEvent(QShowEvent* event) {
         state_->zoom = state_->boundedZoom(state_->zoom, state_->center);
     }
     state_->prepareAtlases();
-    state_->schedule();
 }
 
 void NodeMap::hideEvent(QHideEvent* event) {
@@ -1348,21 +1192,8 @@ void NodeMap::hideEvent(QHideEvent* event) {
         state_->zoom = state_->boundedZoom(state_->cameraZoom, state_->center);
         state_->stopCamera();
     }
-    if (state_->source != Offline) {
-        state_->cancel();
-        state_->stopLoopback();
-    }
     state_->pinLabels.clear();
-    state_->attributionLinks.clear();
-    state_->settle.stop();
-    state_->visibleKeys.clear();
-    state_->attempted.clear();
-    const QList<QString> keys = state_->memory.keys();
-    for (int i = 0; i < keys.size(); ++i) {
-        if (state_->memory.object(keys.at(i))->transient) {
-            state_->memory.remove(keys.at(i));
-        }
-    }
+    state_->cityDetail.sectors.clear();
     QWidget::hideEvent(event);
 }
 
@@ -1398,46 +1229,34 @@ void NodeMap::mouseReleaseEvent(QMouseEvent* event) {
     }
     s.pressing = false;
     const QPoint point = event->pos();
-    if (s.dragging || (point - s.first).manhattanLength() >= 7) {
+    if (s.dragging || (point - s.first).manhattanLength() >= 7 || !s.mapRect().contains(point)) {
         return;
     }
-    if (!s.issue.isEmpty() && s.retryRect().contains(point)) {
-        retryOnlineTiles();
-    } else if (!s.issue.isEmpty() && s.settingsRect().contains(point)) {
-        emit settingsRequested();
-    } else if (s.mapRect().contains(point)) {
-        for (const auto& link : s.attributionLinks) {
-            if (link.first.contains(point) && link.first.contains(s.first)) {
-                QDesktopServices::openUrl(link.second);
-                return;
-            }
+    for (int i = 0; i < s.pinLabels.size(); ++i) {
+        if (s.pinLabels.at(i).first.contains(point)) {
+            emit nodeSelected(s.pinLabels.at(i).second);
+            return;
         }
-        for (int i = 0; i < s.pinLabels.size(); ++i) {
-            if (s.pinLabels.at(i).first.contains(point)) {
-                emit nodeSelected(s.pinLabels.at(i).second);
-                return;
-            }
+    }
+    QList<Pin> hits;
+    for (int i = 0; i < s.pins.size(); ++i) {
+        const Pin& pin = s.pins.at(i);
+        if ((s.screen(pin.position) - point).manhattanLength() <= 19) {
+            hits.append(pin);
         }
-        QList<Pin> hits;
-        for (int i = 0; i < s.pins.size(); ++i) {
-            const Pin& pin = s.pins.at(i);
-            if ((s.screen(pin.position) - point).manhattanLength() <= 19) {
-                hits.append(pin);
-            }
+    }
+    if (hits.size() == 1) {
+        emit nodeSelected(hits.first().id);
+    } else if (hits.size() > 1) {
+        QMenu chooser(this);
+        for (int i = 0; i < hits.size(); ++i) {
+            const Pin& pin = hits.at(i);
+            QAction* action = chooser.addAction(pin.name.isEmpty() ? pin.id : pin.name);
+            action->setData(pin.id);
         }
-        if (hits.size() == 1) {
-            emit nodeSelected(hits.first().id);
-        } else if (hits.size() > 1) {
-            QMenu chooser(this);
-            for (int i = 0; i < hits.size(); ++i) {
-                const Pin& pin = hits.at(i);
-                QAction* action = chooser.addAction(pin.name.isEmpty() ? pin.id : pin.name);
-                action->setData(pin.id);
-            }
-            const QAction* selected = chooser.exec(mapToGlobal(point));
-            if (selected) {
-                emit nodeSelected(selected->data().toString());
-            }
+        const QAction* selected = chooser.exec(mapToGlobal(point));
+        if (selected) {
+            emit nodeSelected(selected->data().toString());
         }
     }
 }
@@ -1454,14 +1273,15 @@ void NodeMap::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_0: s.overview(); break;
         case Qt::Key_O: s.showRegion(); break;
         case Qt::Key_C: s.centerOnRadio(); break;
-        case Qt::Key_R: retryOnlineTiles(); break;
         default: QWidget::keyPressEvent(event); break;
     }
 }
 
 QString NodeMap::statusText() const {
     const State& s = *state_;
-    return s.status(s.source != Offline && s.fullyDrawn(s.tiles()));
+    return s.worldTried && s.world.bounds.isEmpty() && s.detail.bounds.isEmpty()
+        ? ru("Офлайн: подложка недоступна")
+        : ru("Офлайн · узлы %1/%2").arg(s.pins.size()).arg(s.nodeCount);
 }
 
 void NodeMap::paintEvent(QPaintEvent*) {
@@ -1470,36 +1290,26 @@ void NodeMap::paintEvent(QPaintEvent*) {
     painter.fillRect(rect(), color(Background));
     const QRect map = s.mapRect();
     const QRect field = s.openMapRect();
-    const QVector<TilePlacement> placements = s.source == Offline ? QVector<TilePlacement>() : s.tiles();
-    const bool complete = s.fullyDrawn(placements);
     QFont font = painter.font();
     font.setPixelSize(13);
     painter.setFont(font);
     painter.save();
     painter.setClipRect(map);
-    bool world = false;
-    bool detail = false;
-    if (complete) {
-        s.drawTiles(painter, placements);
-    } else {
-        // Retain one continuous basemap until the raster covers the viewport.
-        s.grid(painter, map);
-        world = s.drawAtlas(painter, map, s.world, World, s.detail.bounds.isEmpty());
-        detail = s.drawAtlas(painter, map, s.detail, s.detailRegion, true);
+    s.grid(painter, map);
+    const bool cityCoversView = s.detailRegion == OmskCity &&
+        s.detail.bounds.contains(QRectF(s.areaTopLeft(map, 0), s.areaBottomRight(map, 0)));
+    const bool world = !cityCoversView && s.drawAtlas(painter, map, s.world, World, s.detail.bounds.isEmpty());
+    const bool detail = s.drawAtlas(painter, map, s.detail, s.detailRegion, false);
+    if (detail) {
+        s.drawCityDetail(painter, map);
+        s.drawNames(painter, map, s.detail, s.detailRegion);
     }
     s.drawPins(painter, map);
     font.setPixelSize(11);
     painter.setFont(font);
     const QFontMetrics details(font);
 
-    QString caption = s.status(complete);
-    if (s.issue.isEmpty()) {
-        if (s.source == Offline)
-            caption = ru("Офлайн · %1").arg(regionCaption(s.region));
-        else if (!complete && (world || detail))
-            caption = s.provider == TileProvider::OpenTopoMapR ? ru("Офлайн · загрузка OpenTopoMap-R")
-                                                             : ru("Офлайн · загрузка OSM");
-    }
+    const QString caption = ru("Офлайн · %1").arg(regionCaption(s.region));
     const int captionWidth = details.width(caption) + 2;
     const int statusWidth = qMin(field.width() - 12, captionWidth + 16);
     const QRect status(field.left() + 6, field.top() + 6, statusWidth, 22);
@@ -1507,59 +1317,42 @@ void NodeMap::paintEvent(QPaintEvent*) {
     painter.setPen(Qt::NoPen);
     painter.setBrush(color(Chrome));
     painter.drawRoundedRect(status, 6, 6);
-    painter.setPen(color(s.issue.isEmpty() ? Paper : Repeater));
+    painter.setPen(color(Paper));
     painter.drawText(status.adjusted(8, 0, -8, 0), Qt::AlignVCenter | Qt::AlignLeft,
                      captionWidth <= statusWidth - 16 ? caption
                          : details.elidedText(caption, Qt::ElideRight, qMax(1, statusWidth - 16)));
     painter.setRenderHint(QPainter::Antialiasing, false);
 
     // Keep every visible layer's credit above the pins and scale.
-    struct Attribution { QString text; const char* link; };
-    QVector<Attribution> attribution;
-    s.attributionLinks.clear();
-    const bool topographic = complete && s.provider == TileProvider::OpenTopoMapR;
-    if (topographic) {
-        attribution.append({ru("© OpenTopoMap-R"), "https://github.com/sletuffe/OpenTopoMap"});
-        attribution.append({ru("Поддержать OpenMaps.fr"), "https://openmaps.fr/donate"});
-    }
-    if (complete || (detail && (s.detailRegion == OmskCity || s.detailRegion == OmskOblast))) {
-        attribution.append({ru("© OpenStreetMap contributors"), "https://www.openstreetmap.org/copyright"});
-    }
+    QStringList attribution;
+    if (detail && (s.detailRegion == OmskCity || s.detailRegion == OmskOblast))
+        attribution.append(ru("© OpenStreetMap contributors"));
     if (world || (detail && s.detailRegion == Siberia)) {
-        attribution.append({QLatin1String("Natural Earth"), nullptr});
+        attribution.append(QLatin1String("Natural Earth"));
     }
-    if (attribution.isEmpty() && (s.source == Offline || !s.issue.isEmpty())) {
-        attribution.append({ru("Подложка недоступна"), nullptr});
-    }
+    if (attribution.isEmpty())
+        attribution.append(ru("Подложка недоступна"));
     QRect footer;
     if (!attribution.isEmpty()) {
         int w = 0;
         for (const auto& item : attribution)
-            w = qMax(w, details.width(item.text));
-        const int rowHeight = topographic ? qMax(19, details.height()) : details.height();
+            w = qMax(w, details.width(item));
+        const int rowHeight = details.height();
         const int attributionHeight = rowHeight * attribution.size() + 6;
         const int width = qMin(w + 10, field.width() - 8);
         footer = QRect(field.right() - width - 3, field.bottom() - attributionHeight - 2,
                        width, attributionHeight);
         painter.fillRect(footer, color(Background));
+        painter.setPen(color(Muted));
         for (int i = 0; i < attribution.size(); ++i) {
-            const auto& item = attribution.at(i);
             const QRect row(footer.left() + 5, footer.top() + 3 + i * rowHeight, width - 10, rowHeight);
-            painter.setPen(color(topographic && item.link ? Accent : Muted));
             painter.drawText(row, Qt::AlignRight | Qt::AlignVCenter | Qt::TextSingleLine,
-                             details.elidedText(item.text, Qt::ElideRight, row.width()));
-            if (item.link)
-                s.attributionLinks.append(qMakePair(row.adjusted(-5, 0, 5, 0), QUrl(QLatin1String(item.link))));
+                             details.elidedText(attribution.at(i), Qt::ElideRight, row.width()));
         }
     }
     const double metersPerPixel = s.worldWidthMeters(s.center) / s.scale();
-    const double available = s.scaleBarWidth() * metersPerPixel;
-    double unit = 1.0;
-    while (unit * 10 <= available) {
-        unit *= 10;
-    }
-    const int distance = static_cast<int>((available >= unit * 5 ? 5 : available >= unit * 2 ? 2 : 1) * unit);
-    const int pixels = qMax(1, static_cast<int>(distance / metersPerPixel));
+    const int distance = s.scaleBarDistance();
+    const int pixels = qMax(1, qRound(distance / metersPerPixel));
     const QString distanceLabel = distance >= 1000 ? ru("%1 км").arg(distance / 1000) : ru("%1 м").arg(distance);
     const int scaleWidth = qMax(pixels, details.width(distanceLabel)) + 14;
     const int baseline = !footer.isEmpty() && field.left() + scaleWidth + 10 >= footer.left()
@@ -1570,229 +1363,13 @@ void NodeMap::paintEvent(QPaintEvent*) {
     painter.drawLine(13, baseline, 13 + pixels, baseline);
     painter.drawLine(13, baseline - 3, 13, baseline + 3);
     painter.drawLine(13 + pixels, baseline - 3, 13 + pixels, baseline + 3);
-    if (!s.issue.isEmpty()) {
-        const QRect retry = s.retryRect();
-        const QRect settings = s.settingsRect();
-        painter.fillRect(retry, color(Chrome));
-        painter.fillRect(settings, color(Chrome));
-        painter.setPen(color(Paper));
-        painter.drawText(retry, Qt::AlignCenter, ru("Повторить"));
-        painter.drawText(settings, Qt::AlignCenter, ru("Настройки"));
-    }
     painter.restore();
 }
 
-void NodeMap::retryOnlineTiles() {
-    State& s = *state_;
-    if (s.source == Offline || s.issue.isEmpty())
-        return;
-    s.cancel();
-    s.stopLoopback();
-    s.clearIssue();
-    s.firstTile = true;
-    s.updateView();
-}
-
-void NodeMap::loadVisibleTiles() {
-    State& s = *state_;
-    if (s.source == Offline || s.reply || !isVisible() || !s.issue.isEmpty() || s.camera.isActive()) {
-        return;
-    }
-    s.prepareNetwork();
-    QVector<TilePlacement> placements = s.tiles();
-    const QPoint middle = s.mapAnchor();
-    std::sort(placements.begin(), placements.end(), [middle](const TilePlacement& left, const TilePlacement& right) {
-        return (left.rect.center() - middle).manhattanLength() < (right.rect.center() - middle).manhattanLength();
-    });
-    const QDateTime now = QDateTime::currentDateTimeUtc();
-    // Keep caches separate by provider and stable across local port changes.
-    const QString cacheBase = QString::fromLatin1(s.provider == TileProvider::OpenTopoMapR
-        ? "http://localhost/ommesh-opentopomap-r-tiles/" : "http://localhost/ommesh-osm-tiles/");
-    for (int i = 0; i < placements.size(); ++i) {
-        const QString key = placements.at(i).path();
-        const CachedImage* decoded = s.memory.object(key);
-        if ((decoded && decoded->expires > now) || s.attempted.contains(key)) {
-            continue;
-        }
-        s.attempted.insert(key);
-        const QUrl cacheUrl(cacheBase + key);
-        QNetworkCacheMetaData saved = s.disk->metaData(cacheUrl);
-        if (saved.isValid() && saved.expirationDate() > now) {
-            const QImage image = decodeTile(s.stored(cacheUrl));
-            if (image.isNull()) {
-                s.disk->remove(cacheUrl);
-                saved = QNetworkCacheMetaData();
-            } else {
-                s.hold(key, image, saved.expirationDate(), false);
-                update();
-                continue;
-            }
-        }
-        if (!s.prepareLoopback()) {
-            update();
-            return;
-        }
-        if (!s.localProxy->ready()) {
-            // A cancelled request may still be closing its native socket.
-            s.attempted.remove(key);
-            s.settle.start(150);
-            return;
-        }
-        QNetworkRequest request(QUrl(s.localProxy->baseUrl() + key));
-        request.setRawHeader("User-Agent", "OMMesh-Belle-SIS/0.2.41 (+https://github.com/cm4ker/ommesh)");
-        request.setRawHeader("Accept", "image/png");
-        request.setRawHeader("Accept-Encoding", "identity");
-        const QNetworkCacheMetaData::RawHeaderList previous = saved.rawHeaders();
-        const QByteArray etag = headerValue(previous, "etag");
-        const QByteArray modified = headerValue(previous, "last-modified");
-        if (!etag.isEmpty()) {
-            request.setRawHeader("If-None-Match", etag);
-        }
-        if (!modified.isEmpty()) {
-            request.setRawHeader("If-Modified-Since", modified);
-        }
-        s.replyCacheUrl = cacheUrl;
-        s.replyKey = key;
-        s.received.clear();
-        s.requestError.clear();
-        if (s.firstTile) {
-            s.mark("map: first tile request");
-        }
-        s.reply = s.network->get(request);
-        if (s.firstTile) {
-            s.mark("map: request returned from Qt");
-        }
-        s.reply->setReadBufferSize(MaximumTileBytes + 1);
-        connect(s.reply, SIGNAL(readyRead()), this, SLOT(readTileData()));
-        connect(s.reply, SIGNAL(finished()), this, SLOT(finishCurrentReply()), Qt::QueuedConnection);
-        s.deadline.start(24000);
-        if (s.reply->isFinished()) {
-            QTimer::singleShot(0, this, SLOT(finishTile()));
-        }
-        return;
-    }
-}
-
-void NodeMap::readTileData() {
-    State& s = *state_;
-    if (!s.reply || sender() != s.reply || !s.requestError.isEmpty()) {
-        return;
-    }
-    s.received += s.reply->read(MaximumTileBytes + 1 - s.received.size());
-    if (s.received.size() > MaximumTileBytes) {
-        s.requestError = ru("Плитка слишком большая");
-        QTimer::singleShot(0, this, SLOT(abortFailedTile()));
-    }
-}
-
-void NodeMap::finishCurrentReply() {
-    if (sender() == state_->reply) {
-        finishTile();
-    }
-}
-
-void NodeMap::finishTile() {
-    State& s = *state_;
-    if (!s.reply || !s.reply->isFinished()) {
-        return;
-    }
-    QNetworkReply* reply = s.reply;
-    s.reply = nullptr;
-    s.deadline.stop();
-    const int status = reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    if (s.firstTile || status >= 400 || reply->error() != QNetworkReply::NoError) {
-        s.mark("map: HTTP status", status);
-        if (reply->error() != QNetworkReply::NoError) {
-            s.mark("map: Qt reply error", static_cast<int>(reply->error()));
-        }
-    }
-    s.firstTile = false;
-    QString failure = s.requestError;
-    if (failure.isEmpty() && (status == 200 || status == 304)) {
-        QNetworkCacheMetaData::RawHeaderList headers = reply->rawHeaderPairs();
-        QByteArray data;
-        if (status == 304) {
-            data = s.stored(s.replyCacheUrl);
-            QNetworkCacheMetaData::RawHeaderList previous = s.disk->metaData(s.replyCacheUrl).rawHeaders();
-            for (int i = 0; i < headers.size(); ++i) {
-                const QByteArray name = headers.at(i).first.toLower();
-                for (int j = previous.size() - 1; j >= 0; --j) {
-                    if (previous.at(j).first.toLower() == name) {
-                        previous.removeAt(j);
-                    }
-                }
-                previous.append(headers.at(i));
-            }
-            headers = previous;
-        } else {
-            data = s.received + reply->read(MaximumTileBytes + 1 - s.received.size());
-        }
-        const QImage image = decodeTile(data);
-        if (image.isNull()) {
-            s.disk->remove(s.replyCacheUrl);
-            failure = ru("Плитка не прочитана");
-        } else {
-            const QByteArray control = headerValue(headers, "cache-control").toLower();
-            const bool noStore = control.contains("no-store");
-            const QDateTime expires = tileExpiry(headers, QDateTime::currentDateTimeUtc());
-            s.hold(s.replyKey, image, expires, noStore);
-            if (noStore) {
-                s.disk->remove(s.replyCacheUrl);
-            } else {
-                s.save(s.replyCacheUrl, data, expires, headers);
-            }
-        }
-    } else if (failure.isEmpty()) {
-        if (s.localProxy && (status == 502 || status == 504) &&
-                !s.localProxy->lastError().isEmpty()) {
-            failure = s.localProxy->lastError();
-        } else if (status == 429) {
-            failure = ru("Лимит запросов карты. Повторите позже.");
-        } else if (status == 403) {
-            failure = ru("Сервер карты ограничил доступ (403)");
-        } else if (status > 0) {
-            failure = ru("Сервер карты: HTTP %1").arg(status);
-        } else if (reply->error() == QNetworkReply::ContentAccessDenied) {
-            failure = ru("Проверьте разрешение сети");
-        } else {
-            failure = ru("Нет связи с прокси на телефоне");
-        }
-    }
-    reply->deleteLater();
-    s.received.clear();
-    s.requestError.clear();
-    if (!failure.isEmpty()) {
-        s.issue = failure;
-    } else if (isVisible() && !s.settle.isActive() && !s.camera.isActive()) {
-        s.settle.start(0);
-    }
-    update();
-}
-
-void NodeMap::tileTimedOut() {
-    State& s = *state_;
-    if (s.reply && !s.reply->isFinished()) {
-        s.requestError = ru("Тайм-аут карты");
-        abortFailedTile();
-    }
-}
-
-void NodeMap::abortFailedTile() {
-    State& s = *state_;
-    if (s.reply && !s.requestError.isEmpty() && !s.reply->isFinished()) {
-        s.reply->abort();
-    }
-}
-
 MapSettingsPanel::MapSettingsPanel(QWidget* parent)
-    : QWidget(parent), modes_(new QButtonGroup(this)), providers_(new QButtonGroup(this)),
-      regions_(new QButtonGroup(this)), providerChoices_(new QWidget(this)),
-      regionChoices_(new QWidget(this)), instructions_(new QLabel(this)), validation_(new QLabel(this)) {
+    : QWidget(parent), regions_(new QButtonGroup(this)), validation_(new QLabel(this)) {
     setFocusPolicy(Qt::StrongFocus);
     setStyleSheet(QLatin1String(
-        "QPushButton#mapProviderOpenStreetMap, QPushButton#mapProviderOpenTopoMapR { font-size: 16px; }"
-        "QPushButton#mapOffline:checked, QPushButton#mapLoopback:checked,"
-        "QPushButton#mapProviderOpenStreetMap:checked, QPushButton#mapProviderOpenTopoMapR:checked,"
         "QPushButton#mapRegionOmsk:checked, QPushButton#mapRegionOblast:checked,"
         "QPushButton#mapRegionSiberia:checked, QPushButton#mapRegionWorld:checked"
         " { border: 1px solid #62d5be; background: #26413f; color: #baf4e7; }"
@@ -1800,53 +1377,24 @@ MapSettingsPanel::MapSettingsPanel(QWidget* parent)
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(6);
-    modes_->setExclusive(true);
-    const struct { NodeMap::Source mode; const char* caption; const char* name; } options[] = {
-        {NodeMap::Offline, "Офлайн", "mapOffline"},
-        {NodeMap::Loopback, "На телефоне", "mapLoopback"},
-    };
-    for (const auto& option : options) {
-        auto* button = new QPushButton(ru(option.caption), this);
-        button->setObjectName(QLatin1String(option.name));
-        button->setCheckable(true);
-        button->setMinimumHeight(40);
-        modes_->addButton(button, option.mode);
-        layout->addWidget(button);
-    }
-    instructions_->setTextFormat(Qt::PlainText);
-    instructions_->setWordWrap(true);
-    layout->addWidget(instructions_);
-    auto* providerLayout = new QVBoxLayout(providerChoices_);
-    providerLayout->setContentsMargins(0, 0, 0, 0);
-    providerLayout->setSpacing(6);
-    providers_->setExclusive(true);
-    const struct { TileProvider provider; const char* name; } providers[] = {
-        {TileProvider::OpenStreetMap, "mapProviderOpenStreetMap"},
-        {TileProvider::OpenTopoMapR, "mapProviderOpenTopoMapR"},
-    };
-    for (const auto& option : providers) {
-        auto* button = new QPushButton(providerName(option.provider), providerChoices_);
-        button->setObjectName(QLatin1String(option.name));
-        button->setCheckable(true);
-        button->setMinimumHeight(48);
-        providers_->addButton(button, static_cast<int>(option.provider));
-        providerLayout->addWidget(button);
-    }
-    layout->addWidget(providerChoices_);
-    auto* regionLayout = new QGridLayout(regionChoices_);
+    auto* instructions = new QLabel(ru("Выберите начальную область. Карта работает без интернета. "
+                                        "Масштаб Омска на линейке от 30 км до 30 м."), this);
+    instructions->setTextFormat(Qt::PlainText);
+    instructions->setWordWrap(true);
+    layout->addWidget(instructions);
+    auto* regionLayout = new QGridLayout;
     regionLayout->setContentsMargins(0, 0, 0, 0);
     regionLayout->setSpacing(4);
     const char* regionNames[] = {"mapRegionOmsk", "mapRegionOblast", "mapRegionSiberia", "mapRegionWorld"};
-    regions_->setExclusive(true);
     for (int i = NodeMap::OmskCity; i <= NodeMap::World; ++i) {
-        auto* button = new QPushButton(regionCaption(static_cast<NodeMap::OfflineRegion>(i)), regionChoices_);
+        auto* button = new QPushButton(regionCaption(static_cast<NodeMap::OfflineRegion>(i)), this);
         button->setObjectName(QLatin1String(regionNames[i]));
         button->setMinimumHeight(38);
         button->setCheckable(true);
         regions_->addButton(button, i);
         regionLayout->addWidget(button, 0, i);
     }
-    layout->addWidget(regionChoices_);
+    layout->addLayout(regionLayout);
     validation_->setObjectName(QLatin1String("mapValidation"));
     validation_->setTextFormat(Qt::PlainText);
     validation_->setWordWrap(true);
@@ -1856,37 +1404,16 @@ MapSettingsPanel::MapSettingsPanel(QWidget* parent)
     done->setMinimumHeight(40);
     layout->addWidget(done);
     layout->addStretch(1);
-    connect(modes_, SIGNAL(buttonClicked(int)), this, SLOT(selectMode(int)), Qt::QueuedConnection);
     connect(done, SIGNAL(clicked()), this, SLOT(scheduleSave()));
     reload();
 }
 
 void MapSettingsPanel::reload() {
     saveQueued_ = false;
-    QSettings preferences;
-    const int mode = preferences.value(QLatin1String("map/source"), NodeMap::Offline).toInt();
-    const int selected = NodeMap::sourceFromPreference(mode);
-    modes_->button(selected)->setChecked(true);
-    const int savedRegion = preferences.value(QLatin1String("map/region"), NodeMap::OmskCity).toInt();
+    const int savedRegion = QSettings().value(QLatin1String("map/region"), NodeMap::OmskCity).toInt();
     regions_->button(qBound(static_cast<int>(NodeMap::OmskCity), savedRegion,
                             static_cast<int>(NodeMap::World)))->setChecked(true);
-    const TileProvider provider = providerFromPreference(preferences.value(QLatin1String("map/provider"), 0).toInt());
-    providers_->button(static_cast<int>(provider))->setChecked(true);
-    selectMode(selected);
-}
-
-void MapSettingsPanel::selectMode(int mode) {
-    if (mode != modes_->checkedId()) {
-        return;
-    }
     validation_->hide();
-    regionChoices_->setVisible(mode == NodeMap::Offline);
-    providerChoices_->setVisible(mode == NodeMap::Loopback);
-    if (mode == NodeMap::Loopback) {
-        instructions_->setText(ru("Выберите источник карты. Для обоих нужен интернет на телефоне."));
-    } else {
-        instructions_->setText(ru("Выберите начальную область. Карты работают без интернета и приближаются до 200 м."));
-    }
 }
 
 void MapSettingsPanel::scheduleSave() {
@@ -1904,14 +1431,8 @@ void MapSettingsPanel::save() {
     if (!isVisible()) {
         return;
     }
-    const int mode = modes_->checkedId();
     QSettings preferences;
-    preferences.setValue(QLatin1String("map/source"), mode);
-    if (mode == NodeMap::Offline) {
-        preferences.setValue(QLatin1String("map/region"), regions_->checkedId());
-    } else if (mode == NodeMap::Loopback) {
-        preferences.setValue(QLatin1String("map/provider"), providers_->checkedId());
-    }
+    preferences.setValue(QLatin1String("map/region"), regions_->checkedId());
     preferences.sync();
     if (preferences.status() != QSettings::NoError) {
         validation_->setText(ru("Не удалось сохранить настройки карты."));

@@ -20,7 +20,6 @@ class NodeMap : public QWidget {
     Q_OBJECT
 
 public:
-    enum Source { Offline = 0, Loopback = 3 };
     enum OfflineRegion { OmskCity, OmskOblast, Siberia, World };
     explicit NodeMap(QWidget* parent = nullptr);
     ~NodeMap() override;
@@ -30,9 +29,7 @@ public:
     void setSelfNode(const NetworkNode& node);
     bool focusNode(const NetworkNode& node);
     void setExpanded(bool expanded);
-    void setSource(Source source);
     void setOfflineRegion(OfflineRegion region);
-    static Source sourceFromPreference(int value);
     QString statusText() const;
 
 signals:
@@ -53,13 +50,6 @@ protected:
 private slots:
     void activateControl(int control);
     void advanceCamera();
-    void retryOnlineTiles();
-    void loadVisibleTiles();
-    void readTileData();
-    void finishCurrentReply();
-    void finishTile();
-    void tileTimedOut();
-    void abortFailedTile();
 
 private:
     struct State;
@@ -77,17 +67,11 @@ signals:
     void saved();
 
 private slots:
-    void selectMode(int mode);
     void scheduleSave();
     void save();
 
 private:
-    QButtonGroup* modes_;
-    QButtonGroup* providers_;
     QButtonGroup* regions_;
-    QWidget* providerChoices_;
-    QWidget* regionChoices_;
-    QLabel* instructions_;
     QLabel* validation_;
     bool saveQueued_ = false;
 };

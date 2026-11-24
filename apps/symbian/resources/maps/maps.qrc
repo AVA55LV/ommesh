@@ -1,6 +1,7 @@
 <RCC version="1.0">
     <qresource prefix="/maps">
         <file>omsk.bin</file>
+        <file>omsk-detail.bin</file>
         <file>omsk-oblast.bin</file>
         <file>siberia.bin</file>
         <file>world.bin</file>

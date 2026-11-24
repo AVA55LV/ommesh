@@ -99,7 +99,7 @@ def create_package(args: argparse.Namespace) -> None:
         or struct.unpack_from("<2I", executable, 56) != (HEAP_MIN, HEAP_MAX)
     ):
         raise ValueError("Expected the OMMesh executable from CMake target ommesh_belle_compat")
-    for name in ("omsk.bin", "omsk-oblast.bin", "siberia.bin", "world.bin"):
+    for name in ("omsk.bin", "omsk-detail.bin", "omsk-oblast.bin", "siberia.bin", "world.bin"):
         atlas = (project / "resources/maps" / name).read_bytes()
         if not atlas or atlas not in executable:
             raise ValueError(f"The OMMesh executable is missing the embedded map {name}")

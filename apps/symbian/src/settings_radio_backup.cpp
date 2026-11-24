@@ -362,7 +362,7 @@ void RadioBackupPanel::showHistory() {
     auto* panel = new SettingsBackupPanel(state_->client, this);
     connect(panel, SIGNAL(pickerRequested(QWidget*,QString)), this, SIGNAL(detailRequested(QWidget*,QString)));
     connect(panel, SIGNAL(pickerClosed(QWidget*)), this, SIGNAL(detailCloseRequested(QWidget*)));
-    auto* scroll = makeTouchScrollArea(this, panel);
+    auto* scroll = makeTouchScrollArea(this, panel, true);
     panel->setObjectName(QLatin1String("pane"));
     panel->setAttribute(Qt::WA_StyledBackground);
     scroll->viewport()->setObjectName(QLatin1String("pane"));

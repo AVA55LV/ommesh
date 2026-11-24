@@ -119,7 +119,6 @@ private:
     QPushButton* messagesRow_ = nullptr;
     QPushButton* attachmentsRow_ = nullptr;
     QPushButton* appearanceRow_ = nullptr;
-    QPointer<QPushButton> mapsRow_;
     QPointer<QPushButton> refreshRow_;
     QPointer<QPushButton> clockRow_;
     QPointer<QLabel> clockFeedback_;

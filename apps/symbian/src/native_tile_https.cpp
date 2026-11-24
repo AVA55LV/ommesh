@@ -6,6 +6,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include <QtCore/QUrl>
@@ -22,7 +23,6 @@
 #include "symbian/net/byte_stream.h"
 
 #include "native_tile_ca.hpp"
-#include "native_topo_ca.hpp"
 #include "native_preview_ca.hpp"
 #include "native_attachment_ca.hpp"
 
@@ -32,27 +32,8 @@ namespace http = symbian::http;
 namespace net = symbian::api::connectivity;
 
 constexpr char kPreviewHost[] = "preview.ommesh.ru";
-constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.41 (+https://github.com/cm4ker/ommesh)";
-constexpr int kMaximumTileBytes = 160 * 1024;
+constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.43 (+https://github.com/cm4ker/ommesh)";
 constexpr std::size_t kNativeIoLimit = 32 * 1024;
-constexpr char kPng256Header[] =
-    "\x89" "PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
-    "\x00\x00\x01\x00\x00\x00\x01\x00";
-
-struct TileOrigin {
-    const char* host;
-    const char* name;
-    const char* path;
-    const char* roots;
-    std::size_t rootsSize;
-};
-
-constexpr TileOrigin kStandard = {
-    "tile.openstreetmap.org", "OpenStreetMap", "/", kTileRoots, sizeof(kTileRoots)
-};
-constexpr TileOrigin kTopographic = {
-    "tile.openmaps.fr", "OpenTopoMap-R", "/opentopomap/", kTopoRoots, sizeof(kTopoRoots)
-};
 
 bool cancelled(const QAtomicInt* flag) {
     return flag && const_cast<QAtomicInt*>(flag)->fetchAndAddAcquire(0) != 0;
@@ -62,9 +43,9 @@ absl::Status tlsError(const char* operation, int code) {
     return absl::UnavailableError(std::string(operation) + ": " + std::to_string(code));
 }
 
-class TileTlsStream final : public symbian::net::ByteStream {
+class NativeTlsStream final : public symbian::net::ByteStream {
 public:
-    TileTlsStream(net::TcpClient tcp, const QAtomicInt* cancellation)
+    NativeTlsStream(net::TcpClient tcp, const QAtomicInt* cancellation)
         : tcp_(std::move(tcp)), cancelled_(cancellation) {
         mbedtls_ssl_init(&ssl_);
         mbedtls_ssl_config_init(&config_);
@@ -73,7 +54,7 @@ public:
         mbedtls_x509_crt_init(&roots_);
     }
 
-    ~TileTlsStream() override {
+    ~NativeTlsStream() override {
         mbedtls_ssl_free(&ssl_);
         mbedtls_ssl_config_free(&config_);
         mbedtls_ctr_drbg_free(&random_);
@@ -82,7 +63,7 @@ public:
     }
 
     absl::Status open(const char* host, const char* trustRoots, std::size_t trustRootsLength,
-                      bool allowUntrustedCa, absl::Time deadline) {
+                      absl::Time deadline) {
         deadline_ = deadline;
         if (const auto status = checkDeadline(); !status.ok())
             return status;
@@ -111,8 +92,6 @@ public:
             code = mbedtls_ssl_set_hostname(&ssl_, host);
         if (code != 0)
             return tlsError("TLS setup failed", code);
-        if (allowUntrustedCa)
-            mbedtls_ssl_set_verify(&ssl_, verifyPresentedCa, this);
         mbedtls_ssl_set_bio(&ssl_, this, send, receive, nullptr);
         do {
             if (const auto status = checkDeadline(); !status.ok())
@@ -145,7 +124,7 @@ public:
         if (count == MBEDTLS_ERR_SSL_PEER_CLOSE_NOTIFY)
             return std::size_t{0};
         if (count == 0)
-            return absl::DataLossError("Tile TLS stream closed without an authenticated end");
+            return absl::DataLossError("TLS stream closed without an authenticated end");
         return tlsError("TLS read failed", count);
     }
 
@@ -173,26 +152,14 @@ private:
 
     absl::Status checkDeadline() const {
         if (cancelled(cancelled_))
-            return absl::CancelledError("Tile request cancelled");
+            return absl::CancelledError("HTTPS request cancelled");
         if (absl::Now() >= deadline_)
-            return absl::DeadlineExceededError("Tile request timed out");
+            return absl::DeadlineExceededError("HTTPS request timed out");
         return absl::OkStatus();
     }
 
-    // Mbed TLS calls the verifier from the top of the presented chain down.
-    // Only an intermediate/root CA may lack a trust anchor. A self-signed leaf,
-    // hostname, lifetime, and signatures below that CA retain normal checks.
-    static int verifyPresentedCa(void* context, mbedtls_x509_crt* cert, int depth,
-                                 std::uint32_t* flags) {
-        auto& self = *static_cast<TileTlsStream*>(context);
-        if (std::exchange(self.firstVerification_, false) && depth > 0 &&
-                cert->MBEDTLS_PRIVATE(ca_istrue))
-            *flags &= ~static_cast<std::uint32_t>(MBEDTLS_X509_BADCERT_NOT_TRUSTED);
-        return 0;
-    }
-
     static int send(void* context, const unsigned char* bytes, std::size_t size) {
-        auto& self = *static_cast<TileTlsStream*>(context);
+        auto& self = *static_cast<NativeTlsStream*>(context);
         self.ioError_ = self.checkDeadline();
         if (self.ioError_.ok())
             self.ioError_ = self.tcp_.Send(std::span(bytes, size), self.deadline_);
@@ -200,7 +167,7 @@ private:
     }
 
     static int receive(void* context, unsigned char* bytes, std::size_t size) {
-        auto& self = *static_cast<TileTlsStream*>(context);
+        auto& self = *static_cast<NativeTlsStream*>(context);
         self.ioError_ = self.checkDeadline();
         if (!self.ioError_.ok())
             return MBEDTLS_ERR_NET_RECV_FAILED;
@@ -226,34 +193,7 @@ private:
     mbedtls_entropy_context entropy_;
     mbedtls_x509_crt roots_;
     const char* protocols_[2] = {"http/1.1", nullptr};
-    bool firstVerification_ = true;
 };
-
-TileHttpsResult failure(const absl::Status& status) {
-    TileHttpsResult result;
-    result.error = QString::fromUtf8(status.ToString().c_str());
-    return result;
-}
-
-bool resolverError(const absl::Status& status) {
-    return status.message().find("Resolve TCP hostname:") == 0;
-}
-
-TileHttpsResult tileFailure(const QString& error) {
-    TileHttpsResult result;
-    result.error = error;
-    return result;
-}
-
-TileHttpsResult tileConnectFailure(const absl::Status& status, const QString& provider) {
-    if (resolverError(status))
-        return tileFailure((absl::IsDeadlineExceeded(status)
-            ? QString::fromUtf8("DNS не отвечает для %1")
-            : QString::fromUtf8("DNS: не найден адрес %1")).arg(provider));
-    return tileFailure((absl::IsDeadlineExceeded(status)
-        ? QString::fromUtf8("Тайм-аут соединения с %1")
-        : QString::fromUtf8("Нет TCP-соединения с %1")).arg(provider));
-}
 
 QByteArray header(const http::Headers& headers, const char* name) {
     const auto value = http::GetHeader(headers, name);
@@ -270,117 +210,7 @@ void addValidator(http::Headers& headers, const char* name, const QByteArray& va
 }
 
 }  // namespace
-#endif
 
-TileHttpsResult fetchOsmTile(const TileHttpsRequest& request) {
-#ifdef Q_OS_SYMBIAN
-    if (request.z < 0 || request.z > 19 || request.x < 0 || request.y < 0 ||
-            request.x >= (1 << request.z) || request.y >= (1 << request.z)) {
-        return failure(absl::InvalidArgumentError("Invalid tile coordinates"));
-    }
-    if (cancelled(request.cancelled))
-        return failure(absl::CancelledError("Tile request cancelled"));
-
-    const bool topographic = request.provider == TileProvider::OpenTopoMapR;
-    const TileOrigin& origin = topographic ? kTopographic : kStandard;
-    const QString provider = QString::fromLatin1(origin.name);
-    const auto start = absl::Now();
-    const auto deadline = start + absl::Seconds(19);
-    const auto tcpDeadline = start + absl::Seconds(8);
-    auto tcp = net::TcpClient::ConnectHost(origin.host, 443, tcpDeadline);
-    if (!tcp.ok() && absl::IsNotFound(tcp.status()) && resolverError(tcp.status()) &&
-            !cancelled(request.cancelled) && tcpDeadline - absl::Now() >= absl::Milliseconds(500)) {
-        // Symbian may briefly return KErrNotFound when the bearer first starts.
-        absl::SleepFor(absl::Milliseconds(250));
-        if (!cancelled(request.cancelled))
-            tcp = net::TcpClient::ConnectHost(origin.host, 443, tcpDeadline);
-    }
-    if (!tcp.ok())
-        return tileConnectFailure(tcp.status(), provider);
-    auto tls = std::make_unique<TileTlsStream>(std::move(*tcp), request.cancelled);
-    auto status = tls->open(origin.host, origin.roots, origin.rootsSize,
-                            request.allowUntrustedCa && !topographic, deadline);
-    if (!status.ok())
-        return tileFailure(QString::fromUtf8("Ошибка TLS для %1").arg(provider));
-
-    http::RequestHead outbound;
-    outbound.scheme = "https";
-    outbound.authority = origin.host;
-    outbound.path = origin.path + std::to_string(request.z) + "/" + std::to_string(request.x) +
-                    "/" + std::to_string(request.y) + ".png";
-    outbound.headers = {
-        {"user-agent", kUserAgent},
-        {"accept", "image/png"},
-        {"accept-encoding", "identity"},
-    };
-    const auto baseHeaderCount = outbound.headers.size();
-    addValidator(outbound.headers, "if-none-match", request.etag);
-    addValidator(outbound.headers, "if-modified-since", request.lastModified);
-    const bool conditional = outbound.headers.size() > baseHeaderCount;
-    http::Limits limits;
-    limits.maximum_body_bytes = kMaximumTileBytes;
-    auto exchange = http::Connection::Client(std::move(tls), std::move(outbound),
-                                              http::Protocol::kHttp11, limits, 0, deadline);
-    if (!exchange.ok())
-        return failure(exchange.status());
-    status = (*exchange)->Finish(deadline);
-    if (status.ok())
-        status = (*exchange)->ReceiveHeaders(deadline);
-    if (!status.ok())
-        return failure(status);
-
-    const auto& response = (*exchange)->response();
-    if (response.status == 200 && http::GetHeader(response.headers, "x-blocked")) {
-        TileHttpsResult blocked;
-        blocked.status = 403;
-        return blocked;
-    }
-    if (response.status != 200 && (response.status != 304 || !conditional) &&
-            (response.status < 400 || response.status > 599)) {
-        return tileFailure(QString::fromUtf8("%1: неожиданный ответ HTTP %2")
-                           .arg(provider).arg(response.status));
-    }
-
-    TileHttpsResult result;
-    result.status = response.status;
-    result.contentType = header(response.headers, "content-type");
-    result.cacheControl = header(response.headers, "cache-control");
-    result.etag = header(response.headers, "etag");
-    result.lastModified = header(response.headers, "last-modified");
-    result.expires = header(response.headers, "expires");
-    result.age = header(response.headers, "age");
-    if (result.status != 200)
-        return result;
-    if (result.contentType.trimmed().toLower() != "image/png")
-        return tileFailure(QString::fromUtf8("%1 не вернул плитку PNG").arg(provider));
-    const auto encoding = header(response.headers, "content-encoding").trimmed().toLower();
-    if (!encoding.isEmpty() && encoding != "identity")
-        return tileFailure(QString::fromUtf8("Неподдерживаемое сжатие плитки"));
-
-    while (!cancelled(request.cancelled)) {
-        auto bytes = (*exchange)->Read(deadline);
-        if (!bytes.ok())
-            return failure(bytes.status());
-        if (!bytes->has_value()) {
-            if (!result.body.startsWith(QByteArray::fromRawData(kPng256Header, sizeof(kPng256Header) - 1)))
-                return tileFailure(QString::fromUtf8("Сервер не вернул плитку PNG 256 × 256"));
-            return result;
-        }
-        const auto size = (**bytes).size();
-        if (size > static_cast<std::size_t>(kMaximumTileBytes - result.body.size()))
-            return tileFailure(QString::fromUtf8("Плитка карты слишком большая"));
-        result.body.append((**bytes).data(), static_cast<int>(size));
-    }
-    return failure(absl::CancelledError("Tile request cancelled"));
-#else
-    Q_UNUSED(request);
-    TileHttpsResult result;
-    result.error = QString::fromLatin1("The native tile transport requires Symbian Belle");
-    return result;
-#endif
-}
-
-#ifdef Q_OS_SYMBIAN
 QByteArray fetchOmmeshLinkPreview(const QByteArray& encodedUrl, const QAtomicInt* cancellation, int maximumBytes) {
     if (encodedUrl.isEmpty() || encodedUrl.size() > 2048 || cancelled(cancellation))
         return QByteArray();
@@ -388,8 +218,8 @@ QByteArray fetchOmmeshLinkPreview(const QByteArray& encodedUrl, const QAtomicInt
     auto tcp = net::TcpClient::ConnectHost(kPreviewHost, 443, absl::Now() + absl::Seconds(8));
     if (!tcp.ok())
         return QByteArray();
-    auto tls = std::make_unique<TileTlsStream>(std::move(*tcp), cancellation);
-    if (!tls->open(kPreviewHost, kPreviewRoots, sizeof(kPreviewRoots), false, deadline).ok())
+    auto tls = std::make_unique<NativeTlsStream>(std::move(*tcp), cancellation);
+    if (!tls->open(kPreviewHost, kPreviewRoots, sizeof(kPreviewRoots), deadline).ok())
         return QByteArray();
 
     http::RequestHead outbound;
@@ -445,12 +275,12 @@ int transferAttachment(const QUrl& address, bool put, const QByteArray& contentT
                                            absl::Now() + absl::Seconds(8));
     if (!tcp.ok())
         return failureCode(tcp.status());
-    auto tls = std::make_unique<TileTlsStream>(std::move(*tcp), cancellation);
+    auto tls = std::make_unique<NativeTlsStream>(std::move(*tcp), cancellation);
     QByteArray roots(kAmazonRoots);
     roots.append(kPreviewRoots);
     roots.append(kTileRoots);
     roots.append('\n').append(customCa);
-    auto status = tls->open(host.constData(), roots.constData(), roots.size() + 1, false, deadline);
+    auto status = tls->open(host.constData(), roots.constData(), roots.size() + 1, deadline);
     if (!status.ok()) {
         const int error = failureCode(status);
         return error == -1 ? -2 : error;

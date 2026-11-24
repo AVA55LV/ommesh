@@ -12,6 +12,7 @@
 #include <QtGui/QKeyEvent>
 #include <QtGui/QLayout>
 #include <QtGui/QLineEdit>
+#include <QtGui/QPlainTextEdit>
 #include <QtGui/QScrollArea>
 #include <QtGui/QTextEdit>
 
@@ -41,11 +42,13 @@ void revealEditor(QWidget* editor) {
     }
 }
 
-bool isReadOnly(QWidget* widget) {
+bool isEditableText(QWidget* widget) {
     if (auto* line = qobject_cast<QLineEdit*>(widget))
-        return line->isReadOnly();
+        return !line->isReadOnly();
     if (auto* text = qobject_cast<QTextEdit*>(widget))
-        return text->isReadOnly();
+        return !text->isReadOnly();
+    if (auto* text = qobject_cast<QPlainTextEdit*>(widget))
+        return !text->isReadOnly();
     return false;
 }
 
@@ -88,7 +91,7 @@ protected:
         if (event->timerId() != timer_)
             return;
         if (!editor_ || !editor_->isVisible() || !editor_->isEnabled() ||
-            (customMode_ && isReadOnly(editor_))) {
+            (customMode_ && !isEditableText(editor_))) {
             stop(nullptr);
             return;
         }
@@ -116,7 +119,7 @@ protected:
 private slots:
     void openCustomPanel() {
         if (!customMode_ || !editor_ || QApplication::focusWidget() != editor_ ||
-            !editor_->isVisible() || !editor_->isEnabled() || isReadOnly(editor_))
+            !editor_->isVisible() || !editor_->isEnabled() || !isEditableText(editor_))
             return;
         QWidget* window = editor_->window();
         if (!keyboard_ || keyboard_->parentWidget() != window) {
@@ -133,7 +136,7 @@ private slots:
         const QSettings prefs;
         const auto hints = editor_->inputMethodHints();
         const bool numeric = hints & (Qt::ImhDigitsOnly | Qt::ImhFormattedNumbersOnly | Qt::ImhDialableCharactersOnly);
-        const bool multiline = qobject_cast<QTextEdit*>(editor_) != nullptr;
+        const bool multiline = qobject_cast<QLineEdit*>(editor_) == nullptr;
         keyboard_->configure(prefs.value(QLatin1String(CustomThemePreference), QLatin1String("graphite")).toString(),
                              prefs.value(QLatin1String(CustomVibrationPreference), true).toBool(), numeric, multiline);
         panelOpen_ = true;
@@ -190,7 +193,7 @@ private:
 
     void sendKey(int key, const QString& text) {
         if (!customMode_ || !panelOpen_ || !editor_ || QApplication::focusWidget() != editor_ ||
-            !editor_->isEnabled() || isReadOnly(editor_))
+            !editor_->isEnabled() || !isEditableText(editor_))
             return;
         const QPointer<QWidget> target(editor_);
         QKeyEvent press(QEvent::KeyPress, key, Qt::NoModifier, text);
@@ -205,7 +208,8 @@ private:
         stopOnRelease_ = false;
         if (focus == editor_.data())
             return;
-        if (!focus->isEnabled() || !focus->testAttribute(Qt::WA_InputMethodEnabled) || isReadOnly(focus)) {
+        // Qt's item views also advertise input methods before their focus handler runs.
+        if (!focus->isEnabled() || !focus->testAttribute(Qt::WA_InputMethodEnabled) || !isEditableText(focus)) {
             // Leave the button under the pointer until Qt handles its release.
             if (panelOpen_ && reason == Qt::MouseFocusReason)
                 stopOnRelease_ = true;
@@ -248,7 +252,7 @@ private:
     }
 
     void releaseCustomEditor() {
-        if (customMode_ && editor_ && !isReadOnly(editor_))
+        if (customMode_ && editor_ && isEditableText(editor_))
             editor_->setAttribute(Qt::WA_InputMethodEnabled, true);
     }
 

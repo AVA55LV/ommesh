@@ -33,6 +33,7 @@ add_custom_command(
     -o "${map_resources}" "${map_resource_dir}/maps.qrc"
   DEPENDS "${map_resource_dir}/maps.qrc"
     "${map_resource_dir}/omsk.bin"
+    "${map_resource_dir}/omsk-detail.bin"
     "${map_resource_dir}/omsk-oblast.bin"
     "${map_resource_dir}/siberia.bin" "${map_resource_dir}/world.bin"
   VERBATIM
