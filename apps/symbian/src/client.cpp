@@ -1198,6 +1198,11 @@ QVector<RadioChannel> Client::radioChannels() const {
     return result;
 }
 
+int Client::radioChannelSlot(const QString& id) const {
+    const auto* channel = ready_ ? channelForId(id) : nullptr;
+    return channel && channelId(*channel) == id ? channel->index : -1;
+}
+
 int Client::radioBackupMessageCount() const { return history_.size(); }
 
 std::optional<RadioBackupSnapshot> Client::radioBackupSnapshot() const {
@@ -3238,16 +3243,48 @@ bool Client::eraseLocalHistory(const QString& expectedRadioKey) {
     return true;
 }
 
+bool Client::canEraseChatHistory(const QString& id, const QString& expectedRadioKey) const {
+    return !id.isEmpty() && canEraseLocalHistory() && radioKey_ == expectedRadioKey &&
+           (!reactionRequest_ || reactionRequest_->id != id) &&
+           std::any_of(history_.constBegin(), history_.constEnd(), [&id](const StoredMessage& row) {
+               return row.target == id;
+           });
+}
+
+bool Client::eraseChatHistory(const QString& id, const QString& expectedRadioKey) {
+    if (!canEraseChatHistory(id, expectedRadioKey))
+        return false;
+    QVector<StoredMessage> retained = history_;
+    retained.erase(std::remove_if(retained.begin(), retained.end(), [&id](const StoredMessage& row) {
+        return row.target == id;
+    }), retained.end());
+    if (!saveHistory(retained))
+        return false;
+
+    history_.swap(retained);
+    unread_.remove(id);
+    deferredReactions_.erase(std::remove_if(deferredReactions_.begin(), deferredReactions_.end(),
+        [&id](const PendingReaction& reaction) { return reaction.id == id; }), deferredReactions_.end());
+    echoWatches_.erase(std::remove_if(echoWatches_.begin(), echoWatches_.end(),
+        [&id](const ChannelWatch& watch) { return watch.id == id; }), echoWatches_.end());
+    emit changed();
+    return true;
+}
+
 void Client::saveHistory() {
+    saveHistory(history_);
+}
+
+bool Client::saveHistory(const QVector<StoredMessage>& records) {
     if (radioKey_.size() != 64)
-        return;
+        return false;
 
     QByteArray content;
     QDataStream stream(&content, QIODevice::WriteOnly);
     stream.setVersion(QDataStream::Qt_4_6);
-    stream << quint32(4) << quint32(history_.size());
+    stream << quint32(4) << quint32(records.size());
 
-    for (const auto& record : history_) {
+    for (const auto& record : records) {
         stream << record.target << targetTitle(record.target) << record.message.author
                << record.message.text << record.message.timestamp << record.message.outgoing
                << record.message.delivery << record.message.unread
@@ -3257,7 +3294,10 @@ void Client::saveHistory() {
             stream << reaction.emoji << reaction.actor << reaction.stamp << reaction.own;
         stream << record.message.roomSigner;
     }
+    if (stream.status() != QDataStream::Ok)
+        return false;
     QSettings settings;
     settings.setValue(QString::fromLatin1("radios/%1/history").arg(radioKey_), content);
     settings.sync();
+    return settings.status() == QSettings::NoError;
 }

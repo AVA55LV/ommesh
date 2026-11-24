@@ -218,7 +218,8 @@ class RadioChannelsDialog : public QDialog {
     Q_OBJECT
 
 public:
-    RadioChannelsDialog(Client& client, QWidget* parent, bool adding = false);
+    RadioChannelsDialog(Client& client, QWidget* parent, bool adding = false,
+                        const QString& targetId = QString());
 
 private slots:
     void selectSlot(int index);
@@ -227,6 +228,7 @@ private slots:
     void receiveResult(int slot, bool success, const QString& text);
 
 private:
+    bool targetIsCurrent() const;
     void populate(int preferredSlot);
     void submit(const QString& name, const QString& hex);
 
@@ -239,6 +241,9 @@ private:
     QPushButton* clear_;
     int pendingSlot_ = -1;
     const bool adding_;
+    const QString targetId_;
+    const int targetSlot_;
+    const quint64 targetSession_;
 };
 
 #endif

@@ -1,5 +1,6 @@
 #include "node_chat_options.hpp"
 
+#include <QtCore/QDateTime>
 #include <QtCore/QDir>
 #include <QtCore/QFile>
 #include <QtCore/QSettings>
@@ -8,6 +9,7 @@
 #include <QtGui/QDesktopServices>
 #include <QtGui/QDialog>
 #include <QtGui/QImage>
+#include <QtGui/QLabel>
 #include <QtGui/QListWidget>
 #include <QtGui/QPainter>
 #include <QtGui/QPushButton>
@@ -19,6 +21,7 @@ namespace NodeChatOptions {
 namespace {
 
 enum { Inherited = -1, Off = 0, All = 1, Mentions = 2 };
+const int Forever = -1;
 const char* const fields[] = {"Уведомления", "Звук", "Фон"};
 const char* const keys[] = {"notices", "sound", "background"};
 const char* const sounds[] = {"Без звука", "Чирп", "Принято", "Хоп", "Сонар"};
@@ -29,9 +32,17 @@ const int backgroundCount = sizeof(backgrounds) / sizeof(backgrounds[0]);
 
 QString ui(const char* text) { return QString::fromUtf8(text); }
 
-QString storageKey(Field field, const QString& target) {
+QString storageKey(const QString& target, const char* option) {
     return QLatin1String("chatOptions/") + QString::fromLatin1(target.toUtf8().toHex()) +
-        QLatin1Char('/') + QLatin1String(keys[field]);
+        QLatin1Char('/') + QLatin1String(option);
+}
+
+qint64 activeMute(const QSettings& settings, const QString& target) {
+    if (target.isEmpty())
+        return 0;
+    bool valid = false;
+    const qint64 until = settings.value(storageKey(target, "muteUntil")).toLongLong(&valid);
+    return valid && (until == Forever || until > QDateTime::currentMSecsSinceEpoch()) ? until : 0;
 }
 
 int readChoice(const QSettings& settings, const QString& key, int maximum, int fallback) {
@@ -42,7 +53,7 @@ int readChoice(const QSettings& settings, const QString& key, int maximum, int f
 
 int selected(const QSettings& settings, Field field, const QString& target, bool room) {
     const int maximum = field == Sound ? soundCount - 1 : field == Background ? backgroundCount - 1 : room ? Mentions : All;
-    return readChoice(settings, storageKey(field, target), maximum, Inherited);
+    return readChoice(settings, storageKey(target, keys[field]), maximum, Inherited);
 }
 
 bool defaultNotices(const QSettings& settings, const QString& target) {
@@ -247,7 +258,7 @@ bool choose(Field field, const QString& target, bool room, QWidget* parent) {
         return false;
     const int option = list->currentItem()->data(Qt::UserRole).toInt();
     const QString key = global ? QLatin1String(field == Sound ? "ui/notificationSound" : "ui/chatBackground") :
-                                 storageKey(field, target);
+                                 storageKey(target, keys[field]);
     if (option == Inherited)
         settings.remove(key);
     else
@@ -266,9 +277,72 @@ bool chooseDefault(Field field, QWidget* parent) {
     return choose(field, QString(), false, parent);
 }
 
+bool isMuted(const QSettings& settings, const QString& target) {
+    return activeMute(settings, target) != 0;
+}
+
+bool chooseMute(const QString& target, QWidget* parent) {
+    if (target.isEmpty())
+        return false;
+
+    QSettings settings;
+    const qint64 active = activeMute(settings, target);
+    QDialog dialog(parent);
+    dialog.setObjectName(QLatin1String("chatMuteOptions"));
+    dialog.setWindowTitle(ui("Без уведомлений"));
+    auto* layout = new QVBoxLayout(&dialog);
+    if (active) {
+        const QString deadline = QDateTime::fromMSecsSinceEpoch(active).toLocalTime()
+            .toString(QLatin1String("dd.MM hh:mm"));
+        const QString status = active == Forever ? ui("Уведомления отключены навсегда.") :
+            ui("Уведомления отключены до %1.").arg(deadline);
+        auto* label = new QLabel(status, &dialog);
+        label->setWordWrap(true);
+        layout->addWidget(label);
+    }
+    auto* list = new QListWidget(&dialog);
+    list->setObjectName(QLatin1String("chatMuteOptionList"));
+    list->setProperty("accessibleName", dialog.windowTitle());
+    struct Choice { const char* title; int seconds; };
+    const Choice choices[] = {
+        {"Возобновить уведомления", 0}, {"На 1 час", 3600}, {"На 8 часов", 8 * 3600},
+        {"На 2 дня", 2 * 24 * 3600}, {"Навсегда", Forever}
+    };
+    const int rowHeight = 44;
+    for (const Choice& choice : choices) {
+        if (choice.seconds == 0 && !active)
+            continue;
+        auto* entry = new QListWidgetItem(ui(choice.title), list);
+        entry->setData(Qt::UserRole, choice.seconds);
+        entry->setSizeHint(QSize(0, rowHeight));
+    }
+    list->setMinimumHeight(list->count() * rowHeight + 2 * list->frameWidth());
+    layout->addWidget(list);
+    auto* back = new QPushButton(ui("Назад"), &dialog);
+    back->setObjectName(QLatin1String("closeChatMuteOptions"));
+    back->setMinimumHeight(40);
+    layout->addWidget(back);
+    QObject::connect(back, SIGNAL(clicked()), &dialog, SLOT(reject()));
+    QObject::connect(list, SIGNAL(itemClicked(QListWidgetItem*)), &dialog, SLOT(accept()), Qt::QueuedConnection);
+    QObject::connect(list, SIGNAL(itemActivated(QListWidgetItem*)), &dialog, SLOT(accept()), Qt::QueuedConnection);
+    dialog.resize(330, dialog.minimumSizeHint().height());
+    if (dialog.exec() != QDialog::Accepted || !list->currentItem())
+        return false;
+
+    const int seconds = list->currentItem()->data(Qt::UserRole).toInt();
+    const qint64 until = seconds > 0 ? QDateTime::currentMSecsSinceEpoch() + qint64(seconds) * 1000 : seconds;
+    const QString key = storageKey(target, "muteUntil");
+    if (until)
+        settings.setValue(key, until);
+    else
+        settings.remove(key);
+    settings.sync();
+    return until != active;
+}
+
 bool allowsNotification(const QSettings& settings, const QString& target, bool room,
                         const QString& message, const QString& ownName) {
-    if (settings.value(QLatin1String("ui/doNotDisturb"), false).toBool())
+    if (settings.value(QLatin1String("ui/doNotDisturb"), false).toBool() || isMuted(settings, target))
         return false;
     int mode = selected(settings, Notifications, target, room);
     if (mode == Inherited)

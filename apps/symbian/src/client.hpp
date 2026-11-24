@@ -183,6 +183,8 @@ public:
     QString localHistoryRadioKey() const;
     bool canEraseLocalHistory() const;
     bool eraseLocalHistory(const QString& expectedRadioKey);
+    bool canEraseChatHistory(const QString& id, const QString& expectedRadioKey) const;
+    bool eraseChatHistory(const QString& id, const QString& expectedRadioKey);
     void reloadStoredHistory();
     bool setTrustedContact(int requestId, const QString& publicKey, bool enabled);
     QSet<QString> trustedContactKeys() const;
@@ -203,6 +205,7 @@ public:
     static NodeTelemetryReadings parseNodeTelemetry(const QByteArray& data);
     static std::optional<NodeRouteTraceResult> parseNodeRouteTrace(const QByteArray& data);
     QVector<RadioChannel> radioChannels() const;
+    int radioChannelSlot(const QString& id) const;
     bool setRadioChannel(int slot, const QString& name, const QString& keyHex);
     std::optional<RadioBackupSnapshot> radioBackupSnapshot() const;
     int radioBackupMessageCount() const;
@@ -409,6 +412,7 @@ private:
     void invalidatePending();
     void loadHistory();
     void saveHistory();
+    bool saveHistory(const QVector<StoredMessage>& records);
 
     QTcpSocket* socket_;
 #ifdef Q_OS_SYMBIAN

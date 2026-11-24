@@ -13,7 +13,8 @@ enum Kind {
     Search, Node, Name, Frequency, Readings, Contacts, Privacy, Advanced,
     Notifications, Messages, Attachments, Backup, Appearance, Connection,
     Air, Log, Power, About, Chevron, Back, Gear, Map, Channel, Reconnect, Wlan,
-    Copy, Lock, More, Terminal, RouteCheck, Sound, Close, Check, Chat
+    Copy, Lock, More, Terminal, RouteCheck, Sound, Close, Check, Chat,
+    NotificationsOff, Pin, Unpin, Trash
 };
 
 inline void draw(QPainter& painter, Kind kind, const QRect& bounds, const QColor& color) {
@@ -147,6 +148,9 @@ inline void draw(QPainter& painter, Kind kind, const QRect& bounds, const QColor
             painter.drawEllipse(QRectF(knob - 2, y - 2, 4, 4));
         }
         break;
+    case NotificationsOff:
+        painter.drawLine(QPointF(4, 4), QPointF(20, 20));
+        [[fallthrough]];
     case Notifications:
         outline.moveTo(5, 16.5);
         outline.cubicTo(7, 14.5, 7, 13.1, 7, 9);
@@ -155,6 +159,27 @@ inline void draw(QPainter& painter, Kind kind, const QRect& bounds, const QColor
         outline.closeSubpath();
         outline.moveTo(10, 19.2);
         outline.quadTo(12, 22, 14, 19.2);
+        break;
+    case Unpin:
+        painter.drawLine(QPointF(4, 4), QPointF(20, 20));
+        [[fallthrough]];
+    case Pin:
+        outline.moveTo(8, 4);
+        outline.lineTo(16, 4);
+        outline.lineTo(15, 10);
+        outline.lineTo(18, 14);
+        outline.lineTo(6, 14);
+        outline.lineTo(9, 10);
+        outline.closeSubpath();
+        painter.drawLine(QPointF(12, 14), QPointF(12, 20));
+        break;
+    case Trash:
+        painter.drawLine(QPointF(5, 7), QPointF(19, 7));
+        painter.drawLine(QPointF(9, 4), QPointF(15, 4));
+        outline.moveTo(7, 7);
+        outline.lineTo(8, 20);
+        outline.lineTo(16, 20);
+        outline.lineTo(17, 7);
         break;
     case Messages:
         painter.drawLine(QPointF(5.5, 5.5), QPointF(18.5, 5.5));

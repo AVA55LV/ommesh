@@ -14,7 +14,7 @@
 class ChatView;
 class AnimatedTabStrip;
 class NetworkDashboard;
-class NetworkSheet;
+class BottomSheet;
 class PageTransition;
 class NodeMap;
 class RadioSettingsPanel;
@@ -82,6 +82,8 @@ private slots:
     void openMapSettings();
     void mapSettingsSaved();
     void showChatOptions(const QPoint& position);
+    void closeChatOptions();
+    void applyChatOption();
     void toggleActivePin();
     void manageSettingsConnection();
     void retrySettingsConnection();
@@ -124,7 +126,11 @@ private:
     void showMessages(const QVector<ChatTarget>& targets);
     void saveDraft();
     bool isPinned(const ChatTarget& target) const;
+    void setPinned(const QString& id, bool pinned);
     void togglePin(const QString& id);
+    void dismissChatOptions(bool animate);
+    void showChatProfile(const ChatTarget& target);
+    void confirmChatErase(const ChatTarget& target, const QString& radioKey);
 
     Client& client_;
     QStackedWidget* pages_ = nullptr;
@@ -143,7 +149,11 @@ private:
     QToolButton* chatsTab_ = nullptr;
     AnimatedTabStrip* tabStrip_ = nullptr;
     NetworkDashboard* networkPage_ = nullptr;
-    QPointer<NetworkSheet> networkSheet_;
+    QPointer<BottomSheet> networkSheet_;
+    QPointer<BottomSheet> chatSheet_;
+    QString chatSheetTargetId_;
+    QString chatSheetRadioKey_;
+    quint64 chatSheetSession_ = 0;
     QString networkParentNodeId_;
     QPointer<NetworkFilterPanel> networkFilterPanel_;
     NodeMap* map_ = nullptr;

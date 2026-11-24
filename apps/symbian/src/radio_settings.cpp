@@ -1758,9 +1758,14 @@ void RadioConsoleDialog::append(const QString& text) {
     output_->moveCursor(QTextCursor::End);
 }
 
-RadioChannelsDialog::RadioChannelsDialog(Client& client, QWidget* parent, bool adding)
-    : QDialog(parent), client_(client), adding_(adding) {
-    setWindowTitle(adding_ ? ui("Добавить канал") : ui("Каналы рации"));
+RadioChannelsDialog::RadioChannelsDialog(Client& client, QWidget* parent, bool adding, const QString& targetId)
+    : QDialog(parent), client_(client), adding_(adding && targetId.isEmpty()), targetId_(targetId),
+      targetSlot_(targetId.isEmpty() ? -1 : client.radioChannelSlot(targetId)),
+      targetSession_(client.radioSessionToken()) {
+    if (targetId_.isEmpty())
+        setWindowTitle(adding_ ? ui("Добавить канал") : ui("Каналы рации"));
+    else
+        setWindowTitle(ui("Изменить канал"));
     resize(336, 330);
     auto* layout = new QVBoxLayout(this);
     slots_ = new QComboBox(this);
@@ -1790,15 +1795,24 @@ RadioChannelsDialog::RadioChannelsDialog(Client& client, QWidget* parent, bool a
     connect(save_, SIGNAL(clicked()), this, SLOT(saveChannel()));
     connect(clear_, SIGNAL(clicked()), this, SLOT(clearChannel()));
     connect(&client_, SIGNAL(channelResult(int,bool,QString)), this, SLOT(receiveResult(int,bool,QString)));
-    populate(-1);
+    populate(targetSlot_);
+}
+
+bool RadioChannelsDialog::targetIsCurrent() const {
+    return targetSlot_ >= 0 && client_.radioSessionToken() == targetSession_ &&
+        client_.radioChannelSlot(targetId_) == targetSlot_;
 }
 
 void RadioChannelsDialog::populate(int preferredSlot) {
     const auto channels = client_.radioChannels();
+    const bool targeted = !targetId_.isEmpty();
+    const bool targetAvailable = !targeted || targetIsCurrent();
     slots_->blockSignals(true);
     slots_->clear();
     int current = 0;
     for (const auto& channel : channels) {
+        if (targeted && (!targetAvailable || channel.slot != targetSlot_))
+            continue;
         if (adding_ && (!channel.title.isEmpty() || !channel.key.isEmpty()))
             continue;
         if (channel.slot == preferredSlot)
@@ -1809,7 +1823,9 @@ void RadioChannelsDialog::populate(int preferredSlot) {
     slots_->setCurrentIndex(current);
     slots_->blockSignals(false);
     selectSlot(slots_->currentIndex());
-    if (adding_ && slots_->count() == 0)
+    if (targeted && !targetAvailable)
+        state_->setText(ui("Канал изменился или рация отключена. Откройте настройки канала заново."));
+    else if (adding_ && slots_->count() == 0)
         state_->setText(ui("В рации нет доступных свободных слотов."));
 }
 
@@ -1827,7 +1843,7 @@ void RadioChannelsDialog::selectSlot(int index) {
             break;
         }
     }
-    slots_->setEnabled(pendingSlot_ < 0);
+    slots_->setEnabled(targetId_.isEmpty() && pendingSlot_ < 0);
     save_->setEnabled(slot >= 0 && pendingSlot_ < 0);
     clear_->setEnabled(configured && pendingSlot_ < 0);
 }
@@ -1873,6 +1889,10 @@ void RadioChannelsDialog::submit(const QString& name, const QString& hex) {
     if (slots_->currentIndex() < 0 || pendingSlot_ >= 0)
         return;
     const int slot = slots_->itemData(slots_->currentIndex()).toInt();
+    if (!targetId_.isEmpty() && !targetIsCurrent()) {
+        populate(targetSlot_);
+        return;
+    }
     if (adding_) {
         const auto channels = client_.radioChannels();
         const bool stillFree = std::any_of(channels.begin(), channels.end(), [slot](const RadioChannel& channel) {
@@ -1900,7 +1920,7 @@ void RadioChannelsDialog::receiveResult(int slot, bool success, const QString& t
     if (pendingSlot_ != slot)
         return;
     pendingSlot_ = -1;
-    if (adding_ && success) {
+    if (success && (adding_ || !targetId_.isEmpty())) {
         accept();
         return;
     }

@@ -5,6 +5,7 @@
 #include "message_text.hpp"
 #include "network_node_card.hpp"
 #include "network_node_management.hpp"
+#include "node_chat_options.hpp"
 #include "node_map.hpp"
 #include "radio_settings.hpp"
 #include "settings_icons.hpp"
@@ -20,6 +21,7 @@
 #include <QtCore/QTimer>
 #include <QtCore/QTimerEvent>
 #include <QtGui/QButtonGroup>
+#include <QtGui/QClipboard>
 #include <QtGui/QDialog>
 #include <QtGui/QFontMetrics>
 #include <QtGui/QHBoxLayout>
@@ -30,6 +32,7 @@
 #include <QtGui/QLineEdit>
 #include <QtGui/QListWidget>
 #include <QtGui/QMenu>
+#include <QtGui/QMessageBox>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
 #include <QtGui/QPixmap>
@@ -48,6 +51,7 @@ namespace {
 
 enum ItemData { ItemId = Qt::UserRole, ItemDetail, ItemStamp, ItemUnread,
                 ItemChannel, ItemPinned, ItemRole, ItemPinnedBoundary };
+enum ChatOption { ChatProfile, ChatCopyName, ChatMarkRead, ChatMute, ChatPin, ChatErase };
 const int ChatRoomRole = -1;
 
 QString ui(const char* utf8) { return QString::fromUtf8(utf8); }
@@ -268,50 +272,82 @@ protected:
         press_ = event->pos();
         scroll_ = verticalScrollBar()->value();
         dragged_ = false;
+        held_ = false;
         QListWidgetItem* item = itemAt(press_);
         pressedId_ = item ? item->data(ItemId).toString() : QString();
-        pressTime_.start();
+        pressing_ = true;
+        holdTimer_.stop();
+        if (!pressedId_.isEmpty() && contextMenuPolicy() == Qt::CustomContextMenu)
+            holdTimer_.start(550, this);
         event->accept();
     }
 
     void mouseMoveEvent(QMouseEvent* event) override {
-        if (!(event->buttons() & Qt::LeftButton) || !pressTime_.isValid()) {
+        if (!(event->buttons() & Qt::LeftButton) || !pressing_) {
             QListWidget::mouseMoveEvent(event);
             return;
         }
+        if (held_) {
+            event->accept();
+            return;
+        }
         const QPoint offset = event->pos() - press_;
-        if (offset.manhattanLength() > 8)
+        if (offset.manhattanLength() > 8) {
             dragged_ = true;
+            holdTimer_.stop();
+        }
         if (dragged_)
             verticalScrollBar()->setValue(scroll_ - offset.y());
         event->accept();
     }
 
     void mouseReleaseEvent(QMouseEvent* event) override {
-        if (event->button() != Qt::LeftButton || !pressTime_.isValid()) {
+        if (event->button() != Qt::LeftButton || !pressing_) {
             QListWidget::mouseReleaseEvent(event);
             return;
         }
-        const qint64 held = pressTime_.elapsed();
-        pressTime_.invalidate();
-        if (!dragged_ && (event->pos() - press_).manhattanLength() <= 8) {
+        pressing_ = false;
+        holdTimer_.stop();
+        if (!held_ && !dragged_ && (event->pos() - press_).manhattanLength() <= 8) {
             QListWidgetItem* item = itemAt(event->pos());
             if (item && pressedId_ == item->data(ItemId).toString()) {
                 setCurrentItem(item);
-                if (held >= 550 && contextMenuPolicy() == Qt::CustomContextMenu)
-                    emit customContextMenuRequested(event->pos());
-                else
-                    emit itemClicked(item);
+                emit itemClicked(item);
             }
         }
         event->accept();
     }
 
+    void hideEvent(QHideEvent* event) override {
+        holdTimer_.stop();
+        held_ = true;
+        QListWidget::hideEvent(event);
+    }
+
+    void timerEvent(QTimerEvent* event) override {
+        if (event->timerId() != holdTimer_.timerId()) {
+            QListWidget::timerEvent(event);
+            return;
+        }
+        holdTimer_.stop();
+        if (!pressing_ || dragged_)
+            return;
+        // A release after a hold must never turn into a short tap.
+        held_ = true;
+        QListWidgetItem* item = itemAt(press_);
+        if (isVisible() && item && item->data(ItemId).toString() == pressedId_) {
+            setCurrentItem(item);
+            emit customContextMenuRequested(press_);
+        }
+    }
+
 private:
-    QElapsedTimer pressTime_;
+    QBasicTimer holdTimer_;
     QPoint press_;
     QString pressedId_;
     int scroll_ = 0;
+    bool pressing_ = false;
+    bool held_ = false;
     bool dragged_ = false;
 };
 
@@ -582,6 +618,9 @@ QString themeStyle(const Appearance::Palette& colors) {
         "#networkNodes, #networkSheetScroll, #networkSheetViewport, #networkFilterPanel, #networkNodeCard {"
         " background: @group@; }"
         "#networkSheet #settingsGroup { background: @canvas@; }"
+        "#chatOptionsActions QPushButton { min-height: 32px; text-align: left; color: @accent@; }"
+        "#chatOptionsActions QPushButton#eraseChatMessages { color: @danger@; }"
+        "#chatOptionsActions QPushButton#eraseChatMessages:disabled { color: @muted@; }"
         "#networkNodeCard QLabel#networkNodeTitle { font-size: 20px; font-weight: bold; }"
         "#networkNodeCard QLabel#networkRowTitle { font-size: 15px; }"
         "#networkNodeCard QLabel#networkRowValue { color: @muted@; font-size: 13px; }"
@@ -897,9 +936,9 @@ private:
     PanelMotion motion_{0};
 };
 
-class NetworkSheet : public QWidget {
+class BottomSheet : public QWidget {
 public:
-    NetworkSheet(QWidget* owner, QWidget* content, const QString& title,
+    BottomSheet(QWidget* owner, QWidget* content, const QString& title,
                  bool fullHeight, const std::function<void()>& close)
         : QWidget(owner), card_(surface(this, "networkSheet")), close_(close),
           fullHeight_(fullHeight || title.isEmpty()) {
@@ -1217,6 +1256,7 @@ QWidget* ClientWindow::makeChatsPage() {
     emptyChats_->setAlignment(Qt::AlignCenter);
     layout->addWidget(emptyChats_);
     targets_ = makeList(page, ui("Чаты"));
+    targets_->setObjectName(QLatin1String("chatTargets"));
     targets_->setContextMenuPolicy(Qt::CustomContextMenu);
     layout->addWidget(targets_, 1);
     connectFromChats_ = button(ui("Подключить рацию"), page, true);
@@ -1535,6 +1575,7 @@ void ClientWindow::applyNavigation() {
     // Keep focus outside both stacks before they hide the old page.
     focusNavigation(action == Navigation::Tab ? pendingTab_ : tab_);
     dismissNetworkSheet(false);
+    dismissChatOptions(false);
     client_.traceConnection("ui navigation focus settled");
     if (action == Navigation::Exit) {
         close();
@@ -1585,6 +1626,8 @@ void ClientWindow::applyNavigation() {
     client_.traceConnection("ui navigation page shown");
     updateView();
     pageTransition_->reveal(previous, direction);
+    if (action == Navigation::Tab && tab_ == Network && !pendingNodeId_.isEmpty())
+        openPendingNode();
     client_.traceConnection("ui navigation end");
 }
 
@@ -1851,7 +1894,7 @@ void ClientWindow::openTarget(QListWidgetItem* item) {
 void ClientWindow::openPendingTarget() {
     const QString id = pendingTargetId_;
     pendingTargetId_.clear();
-    if (id.isEmpty() || (pages_->currentWidget() == chatPage_ && id == activeId_))
+    if (id.isEmpty() || chatSheet_ || (pages_->currentWidget() == chatPage_ && id == activeId_))
         return;
     const QVector<ChatTarget> targets = client_.targets();
     for (const ChatTarget& target : targets) {
@@ -1975,7 +2018,7 @@ void ClientWindow::openNetworkNeighbour(const QString& id) {
 
 void ClientWindow::showNetworkSheet(QWidget* content, const QString& title, bool fullHeight) {
     focusNavigation(Network);
-    networkSheet_ = new NetworkSheet(networkPage_, content, title, fullHeight,
+    networkSheet_ = new BottomSheet(networkPage_, content, title, fullHeight,
                                      [this] { closeNetworkSheet(); });
     connect(networkSheet_->closeButton(), SIGNAL(clicked()), this, SLOT(closeNetworkSheet()),
             Qt::QueuedConnection);
@@ -1984,7 +2027,7 @@ void ClientWindow::showNetworkSheet(QWidget* content, const QString& title, bool
 void ClientWindow::dismissNetworkSheet(bool animate) {
     if (!networkSheet_)
         return;
-    NetworkSheet* sheet = networkSheet_.data();
+    BottomSheet* sheet = networkSheet_.data();
     networkSheet_ = nullptr;
     networkFilterPanel_ = nullptr;
     networkParentNodeId_.clear();
@@ -2050,15 +2093,148 @@ void ClientWindow::mapSettingsSaved() {
 }
 
 void ClientWindow::showChatOptions(const QPoint& position) {
+    if (tab_ != Chats || pages_->currentWidget() != dashboard_ || chatSheet_ ||
+            pendingNavigation_ != Navigation::None || !pendingTargetId_.isEmpty())
+        return;
     QListWidgetItem* item = targets_->itemAt(position);
     if (!item)
         return;
     const QString id = item->data(ItemId).toString();
-    QMenu actions(this);
-    QAction* pin = actions.addAction(item->data(ItemPinned).toBool() ?
-                                     ui("Открепить чат") : ui("Закрепить чат"));
-    if (actions.exec(targets_->viewport()->mapToGlobal(position)) == pin)
-        togglePin(id);
+    const bool channel = item->data(ItemChannel).toBool();
+    const bool pinned = item->data(ItemPinned).toBool();
+    const bool muted = NodeChatOptions::isMuted(QSettings(), id);
+    chatSheetTargetId_ = id;
+    chatSheetRadioKey_ = client_.localHistoryRadioKey();
+    chatSheetSession_ = client_.radioSessionToken();
+
+    QWidget* content = surface(this, "chatOptionsActions");
+    auto* rows = new QVBoxLayout(content);
+    rows->setContentsMargins(0, 0, 0, 0);
+    rows->setSpacing(2);
+    const Appearance::Palette colors = Appearance::paletteFor(this);
+    auto add = [&](ChatOption action, const char* name, const QString& text,
+                   SettingsIcons::Kind icon, bool enabled = true) {
+        QPushButton* row = button(text, content);
+        row->setObjectName(QLatin1String(name));
+        row->setIcon(SettingsIcons::icon(icon, action == ChatErase ? colors.danger : colors.muted, 20));
+        row->setIconSize(QSize(20, 20));
+        row->setProperty("chatOption", int(action));
+        row->setEnabled(enabled);
+        rows->addWidget(row);
+        connect(row, SIGNAL(clicked()), this, SLOT(applyChatOption()), Qt::QueuedConnection);
+    };
+    add(ChatProfile, "chatProfile", channel ? ui("Канал") : ui("Профиль"),
+        channel ? SettingsIcons::Channel : SettingsIcons::Name);
+    add(ChatCopyName, "copyChatName", channel ? ui("Копировать название") : ui("Копировать имя"),
+        SettingsIcons::Copy);
+    if (item->data(ItemUnread).toInt() > 0)
+        add(ChatMarkRead, "markChatRead", ui("Отметить прочитанным"), SettingsIcons::Check);
+    add(ChatMute, "muteChat", muted ? ui("Уведомления выключены…") : ui("Без уведомлений…"),
+        muted ? SettingsIcons::Notifications : SettingsIcons::NotificationsOff);
+    add(ChatPin, "pinChat", pinned ? ui("Открепить") : ui("Закрепить"),
+        pinned ? SettingsIcons::Unpin : SettingsIcons::Pin);
+    add(ChatErase, "eraseChatMessages", channel ? ui("Очистить сообщения") : ui("Удалить чат"),
+        SettingsIcons::Trash, client_.canEraseChatHistory(id, chatSheetRadioKey_));
+    rows->addStretch(1);
+
+    chatSheet_ = new BottomSheet(this, content, item->text(), false,
+                                 [this] { closeChatOptions(); });
+    chatSheet_->setObjectName(QLatin1String("chatOptionsOverlay"));
+    chatSheet_->closeButton()->setObjectName(QLatin1String("closeChatOptions"));
+    connect(chatSheet_->closeButton(), SIGNAL(clicked()), this, SLOT(closeChatOptions()), Qt::QueuedConnection);
+}
+
+void ClientWindow::dismissChatOptions(bool animate) {
+    if (!chatSheet_)
+        return;
+    BottomSheet* sheet = chatSheet_.data();
+    chatSheet_ = nullptr;
+    chatSheetTargetId_.clear();
+    chatSheetRadioKey_.clear();
+    sheet->dismiss(animate);
+}
+
+void ClientWindow::closeChatOptions() {
+    dismissChatOptions(true);
+}
+
+void ClientWindow::applyChatOption() {
+    auto* row = qobject_cast<QPushButton*>(sender());
+    if (!row || !chatSheet_ || !chatSheet_->isAncestorOf(row))
+        return;
+    const auto action = static_cast<ChatOption>(row->property("chatOption").toInt());
+    const QString id = chatSheetTargetId_;
+    const QString radioKey = chatSheetRadioKey_;
+    const bool sameSession = chatSheetSession_ == client_.radioSessionToken();
+    dismissChatOptions(false);
+    if (!sameSession)
+        return;
+    const QVector<ChatTarget> targets = client_.targets();
+    const auto target = std::find_if(targets.constBegin(), targets.constEnd(),
+                                     [&id](const ChatTarget& entry) { return entry.id == id; });
+    if (target == targets.constEnd())
+        return;
+    switch (action) {
+    case ChatProfile:
+        showChatProfile(*target);
+        break;
+    case ChatCopyName:
+        if (QClipboard* clipboard = QApplication::clipboard())
+            clipboard->setText(target->title);
+        break;
+    case ChatMarkRead:
+        client_.markRead(id);
+        break;
+    case ChatMute:
+        NodeChatOptions::chooseMute(id, this);
+        break;
+    case ChatPin:
+        setPinned(id, !isPinned(*target));
+        break;
+    case ChatErase:
+        confirmChatErase(*target, radioKey);
+        break;
+    }
+}
+
+void ClientWindow::showChatProfile(const ChatTarget& target) {
+    if (target.channel && client_.radioChannelSlot(target.id) >= 0) {
+        RadioChannelsDialog dialog(client_, this, false, target.id);
+        dialog.exec();
+        return;
+    }
+    if (!target.channel && !findNetworkNode(target.id).id.isEmpty()) {
+        selectTab(Network);
+        pendingNodeId_ = target.id;
+        return;
+    }
+    const QString type = target.channel ? ui("Канал") : ui("Профиль");
+    QMessageBox details(QMessageBox::Information, type,
+        ui("%1\nДоступна сохранённая переписка.").arg(target.title), QMessageBox::Ok, this);
+    details.setTextFormat(Qt::PlainText);
+    details.exec();
+}
+
+void ClientWindow::confirmChatErase(const ChatTarget& target, const QString& radioKey) {
+    const QString title = target.channel ? ui("Очистить сообщения") : ui("Удалить чат");
+    if (!client_.canEraseChatHistory(target.id, radioKey)) {
+        QMessageBox::information(this, title, ui("История сейчас недоступна для удаления."));
+        return;
+    }
+    const QString question = ui("Удалить локальную историю «%1» на этом телефоне?").arg(target.title);
+    QMessageBox confirmation(QMessageBox::Question, title, question, QMessageBox::Yes | QMessageBox::No, this);
+    confirmation.setTextFormat(Qt::PlainText);
+    confirmation.setDefaultButton(QMessageBox::No);
+    if (confirmation.exec() != QMessageBox::Yes)
+        return;
+    if (!client_.eraseChatHistory(target.id, radioKey)) {
+        QMessageBox::information(this, title, ui("Не удалось удалить историю этого разговора."));
+        return;
+    }
+    if (!target.channel) {
+        drafts_.remove(target.id);
+        setPinned(target.id, false);
+    }
 }
 
 void ClientWindow::toggleActivePin() {
@@ -2071,15 +2247,18 @@ bool ClientWindow::isPinned(const ChatTarget& target) const {
     return pins_.value(target.id, standardPublic).toBool();
 }
 
+void ClientWindow::setPinned(const QString& id, bool pinned) {
+    pins_.insert(id, pinned);
+    QSettings().setValue(QLatin1String("chats/pins"), pins_);
+    updateView();
+}
+
 void ClientWindow::togglePin(const QString& id) {
     const QVector<ChatTarget> targets = client_.targets();
     for (const ChatTarget& target : targets) {
         if (target.id != id)
             continue;
-        pins_.insert(id, !isPinned(target));
-        QSettings preferences;
-        preferences.setValue(QLatin1String("chats/pins"), pins_);
-        updateView();
+        setPinned(id, !isPinned(target));
         return;
     }
 }
@@ -2453,7 +2632,9 @@ void ClientWindow::keyPressEvent(QKeyEvent* event) {
         return;
     }
 
-    if (pages_->currentWidget() == chatPage_)
+    if (chatSheet_)
+        closeChatOptions();
+    else if (pages_->currentWidget() == chatPage_)
         returnToDashboard();
     else if (pages_->currentWidget() == connectionPage_ || pages_->currentWidget() == detailPage_)
         returnToDashboard();
