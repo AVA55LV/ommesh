@@ -20,7 +20,7 @@
 
 ## OMMesh Belle for Nokia
 
-This fork adds an unofficial native Symbian Belle client for MeshCore. The app connects to a MeshCore Companion Wi-Fi radio over TCP and provides direct messages, channels, routes, offline maps, and radio tools. Nokia 700 is the primary target. Version 0.2.31 was tested in EKA2L1 on Nokia X7. See the compatibility table for earlier tests on other models.
+This fork adds an unofficial native Symbian Belle client for MeshCore. The app connects to a MeshCore Companion Wi-Fi radio over TCP and provides direct messages, channels, routes, offline maps, and radio tools. Nokia 700 is the primary target. Version 0.2.32 was tested in EKA2L1 on Nokia X7. See the compatibility table for earlier tests on other models.
 
 [Symbian installation, features, and device compatibility (Russian)](apps/symbian/README.md) · [Download the SIS test release](https://github.com/AVA55LV/ommesh/releases/latest)
 

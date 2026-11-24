@@ -11,6 +11,8 @@
 #include <QtCore/QVariant>
 #include <QtGui/QWidget>
 
+#include <functional>
+
 class ChatView;
 class AnimatedTabStrip;
 class NetworkDashboard;
@@ -32,6 +34,9 @@ class QVBoxLayout;
 
 QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content);
 QListWidget* makeTouchList(QWidget* parent);
+QWidget* showCompactSheet(QWidget* owner, QWidget* content, const QString& title,
+                          const char* closeSlot, const std::function<void()>& close);
+void dismissCompactSheet(QWidget* sheet, bool animate);
 
 class ClientWindow : public QWidget {
     Q_OBJECT

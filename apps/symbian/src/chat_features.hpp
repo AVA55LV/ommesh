@@ -5,6 +5,7 @@
 #include "client.hpp"
 
 #include <QtCore/QPoint>
+#include <QtCore/QPointer>
 #include <QtCore/QStringList>
 #include <QtGui/QBrush>
 #include <QtGui/QWidget>
@@ -51,9 +52,14 @@ public:
     void followSentMessage(const QString& text);
     void setSendingState(bool canSend, int maxBytes);
     void setPinned(bool pinned);
+    bool dismissMessageActions(bool animate = true);
     void syncLinkPreviewMode();
     void syncChatBackground();
     void setAppearance(const Appearance::Palette& palette, int chatTextSize);
+
+protected:
+    void hideEvent(QHideEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 signals:
     void backRequested();
@@ -71,7 +77,8 @@ private slots:
     void updateComposer();
     void send();
     void showMessageActions();
-    void selectQuickReaction(int choice);
+    void closeMessageActions();
+    void selectMessageAction();
     void applyDeferredMessages();
     void refreshLinkPreviews();
     void toggleMessageSearch(bool open);
@@ -88,7 +95,7 @@ private:
     QString composerText(int start = 0, int end = -1) const;
     QString outgoingText(const QString& body) const;
     void showQuotePreview();
-    void queueMessageActions(int index, const QPoint& globalPosition, bool blockedRun = false,
+    void queueMessageActions(int index, bool blockedRun = false,
                              const QString& reactionEmoji = QString());
     int pickEmoji(const QString& title);
     void reactTo(const ChatMessage& message, const QString& emoji);
@@ -115,6 +122,8 @@ private:
     QTextEdit* quoteText_;
     QTextEdit* composer_;
     QTimer* keyboardWatch_;
+    bool keyboardPanelOpen_ = false;
+    int keyboardTouchActive_ = -1;
     QPushButton* emojiButton_;
     QPushButton* attachmentButton_;
     QPushButton* sendButton_;
@@ -129,14 +138,13 @@ private:
     ChatMessage actionMessage_;
     QStringList actionNewerTexts_;
     QString actionTarget_;
-    QPoint actionPosition_;
+    QPointer<QWidget> messageActions_;
     bool actionBlockedRun_ = false;
     QString actionReaction_;
     Appearance::Palette palette_;
     QBrush backdrop_;
     int chatTextSize_;
     int maxBytes_;
-    int reactionChoice_;
     bool canSend_;
     bool editingDraft_;
     bool restoreDisplay_;

@@ -1,15 +1,49 @@
 #ifndef OMMESH_BELLE_NATIVE_KEYBOARD_HPP
 #define OMMESH_BELLE_NATIVE_KEYBOARD_HPP
 
+#include <QtCore/QRect>
+
+#ifdef Q_OS_SYMBIAN
+#include <QtGui/QApplication>
+#endif
+
 class QWidget;
 
 namespace NativeKeyboard {
 
 constexpr char FullScreenPreference[] = "ui/fullScreenKeyboard";
 
+enum class PanelEvent { None, Open, Closed };
+
+#ifdef Q_OS_SYMBIAN
+class Application : public QApplication {
+public:
+    using QApplication::QApplication;
+
+protected:
+    bool symbianEventFilter(const QSymbianEvent* event) override;
+
+private:
+    friend PanelEvent takePanelEvent();
+    PanelEvent pendingEvent_ = PanelEvent::None;
+};
+#endif
+
 bool fullScreenPreferred();
 bool setSplitMode(QWidget* focusedEditor, bool split);
-int splitViewBottom();
+PanelEvent takePanelEvent();
+int touchInputActive();
+int splitViewBottom(const QRect& screen);
+
+inline int splitViewBottomForClient(const QRect& screen, int clientBottom) {
+    if (screen.isEmpty())
+        return -1;
+    // Ordinary status and softkey panes are much smaller than the input panel.
+    if (clientBottom > screen.top() && screen.bottom() + 1 - clientBottom >= screen.height() / 4)
+        return clientBottom;
+    // Nokia's portrait FEP can cover about half of the screen.
+    return screen.top() + screen.height() / 2;
+}
 
 } // namespace NativeKeyboard
 

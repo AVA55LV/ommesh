@@ -5,6 +5,7 @@
 #include "node_chat_options.hpp"
 #include "settings_attachments.hpp"
 #include "settings_icons.hpp"
+#include "window.hpp"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QCryptographicHash>
@@ -21,6 +22,7 @@
 #include <QtGui/QAbstractTextDocumentLayout>
 #include <QtGui/QAction>
 #include <QtGui/QContextMenuEvent>
+#include <QtGui/QDesktopWidget>
 #include <QtGui/QDesktopServices>
 #include <QtGui/QDialog>
 #include <QtGui/QFont>
@@ -28,6 +30,7 @@
 #include <QtGui/QGridLayout>
 #include <QtGui/QHBoxLayout>
 #include <QtGui/QImage>
+#include <QtGui/QInputContext>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QLabel>
 #include <QtGui/QLineEdit>
@@ -53,7 +56,6 @@
 #include <QtGui/QTextLayout>
 #include <QtGui/QTextTable>
 #include <QtGui/QVBoxLayout>
-#include <QtGui/QWidgetAction>
 #include <QtCore/QSignalMapper>
 
 #include <algorithm>
@@ -72,6 +74,7 @@ const int nameLimit = 32;
 const int excerptCharacters = 15;
 const int excerptBytes = 30;
 const int tapSlop = 9;
+const int messageHoldMs = 550;
 const int quickReactions[] = {9, 11, 2, 21, 7, 15};
 const int moreReactions = sizeof(quickReactions) / sizeof(quickReactions[0]);
 const int receiptWidth = 21;
@@ -86,6 +89,8 @@ const int chatBottomMargin = 6;
 const int keyboardWatchMs = 150;
 
 enum ReceiptKind { NoReceipt, SendingReceipt, WaitingReceipt, AcceptedReceipt, ConfirmedReceipt };
+enum MessageMenuAction { RemoveReaction, Reply, Resend, ReactionPeople, MessageDetails, BlockSender,
+                         FirstQuickReaction };
 
 struct Receipt {
     int position = -1;
@@ -242,6 +247,7 @@ QString paletteStyle(const char* style, const Appearance::Palette& palette, int 
         .replace(QLatin1String("@accent"), palette.accent.name())
         .replace(QLatin1String("@onAccent"), palette.onAccent.name())
         .replace(QLatin1String("@selection"), palette.selection.name())
+        .replace(QLatin1String("@danger"), palette.danger.name())
         .replace(QLatin1String("@size"), QString::number(textSize));
 }
 
@@ -1172,6 +1178,18 @@ protected:
     }
 
     void timerEvent(QTimerEvent* event) {
+        if (event->timerId() == holdTimer_) {
+            stopHoldTimer();
+            if (down_ && !dragging_) {
+                if (QTextFrame* frame = frameAt(downAt_)) {
+                    focusFrame_ = navigationFrames_.indexOf(frame);
+                    suppressRelease_ = true;
+                    queueFrameAction(frame);
+                    finishGesture();
+                }
+            }
+            return;
+        }
         if (event->timerId() != receiptTimer_) {
             QTextEdit::timerEvent(event);
             return;
@@ -1209,6 +1227,9 @@ protected:
         suppressRelease_ = false;
         downAt_ = event->pos();
         lastDragY_ = downAt_.y();
+        stopHoldTimer();
+        if (frameAt(downAt_))
+            holdTimer_ = startTimer(messageHoldMs);
         event->accept();
     }
 
@@ -1240,9 +1261,9 @@ protected:
                 const QString emoji = reactionAt(event->pos());
                 if (!emoji.isEmpty() && emoji == reactionAt(downAt_)) {
                     owner_->queueMessageActions(frame->frameFormat().intProperty(messageIndex),
-                                                event->globalPos(), false, emoji);
+                                                false, emoji);
                 } else if (!handleLinkTap(frame, event->pos())) {
-                    queueFrameAction(frame, event->globalPos());
+                    queueFrameAction(frame);
                 }
             }
         }
@@ -1252,13 +1273,19 @@ protected:
     void contextMenuEvent(QContextMenuEvent* event) {
         QTextFrame* frame = event->reason() == QContextMenuEvent::Keyboard
             ? navigationFrames_.value(focusFrame_) : frameAt(event->pos());
-        if (frame && (!down_ || !dragging_)) {
+        if (frame && !suppressRelease_ && (!down_ || (!dragging_ && frame == frameAt(downAt_)))) {
             focusFrame_ = navigationFrames_.indexOf(frame);
             suppressRelease_ = down_;
             finishGesture();
-            queueFrameAction(frame, event->globalPos());
+            queueFrameAction(frame);
         }
         event->accept();
+    }
+
+    void hideEvent(QHideEvent* event) override {
+        finishGesture();
+        suppressRelease_ = false;
+        QTextEdit::hideEvent(event);
     }
 
     void keyPressEvent(QKeyEvent* event) {
@@ -1275,7 +1302,7 @@ protected:
             event->accept();
         } else if (key == Qt::Key_Enter || key == Qt::Key_Return || key == Qt::Key_Select) {
             if (QTextFrame* frame = navigationFrames_.value(focusFrame_))
-                queueFrameAction(frame, viewport()->mapToGlobal(viewport()->rect().center()));
+                queueFrameAction(frame);
             event->accept();
         } else {
             QTextEdit::keyPressEvent(event);
@@ -1384,6 +1411,7 @@ private:
     void moveGesture(const QPoint& at) {
         if (!dragging_ && (at - downAt_).manhattanLength() > tapSlop) {
             dragging_ = true;
+            stopHoldTimer();
             owner_->pendingSentText_.clear();
         }
         if (dragging_) {
@@ -1394,9 +1422,17 @@ private:
     }
 
     void finishGesture() {
+        stopHoldTimer();
         if (down_) {
             down_ = false;
             QTimer::singleShot(0, owner_, SLOT(applyDeferredMessages()));
+        }
+    }
+
+    void stopHoldTimer() {
+        if (holdTimer_ != 0) {
+            killTimer(holdTimer_);
+            holdTimer_ = 0;
         }
     }
 
@@ -1438,10 +1474,9 @@ private:
         return bubbleBounds(document()->documentLayout(), frame).contains(at) ? frame : 0;
     }
 
-    void queueFrameAction(QTextFrame* frame, const QPoint& globalPosition) {
+    void queueFrameAction(QTextFrame* frame) {
         const QTextFrameFormat format = frame->frameFormat();
-        owner_->queueMessageActions(format.intProperty(messageIndex), globalPosition,
-                                    format.boolProperty(blockedRunMarker));
+        owner_->queueMessageActions(format.intProperty(messageIndex), format.boolProperty(blockedRunMarker));
     }
 
     void focusMessage(QTextFrame* frame) {
@@ -1471,11 +1506,12 @@ private:
     QSet<QString> openLinkCards_;
     QElapsedTimer receiptClock_;
     int receiptTimer_;
+    int holdTimer_ = 0;
 };
 
 ChatView::ChatView(QWidget* parent)
     : QWidget(parent), palette_(Appearance::palette(Appearance::Graphite)),
-      chatTextSize_(Appearance::DefaultChatTextSize), maxBytes_(0), reactionChoice_(-1),
+      chatTextSize_(Appearance::DefaultChatTextSize), maxBytes_(0),
       canSend_(false), editingDraft_(false),
       restoreDisplay_(false), hasMessageSnapshot_(false) {
     setObjectName(QLatin1String("nativeChat"));
@@ -1559,6 +1595,7 @@ ChatView::ChatView(QWidget* parent)
     QPushButton* clearQuote = makeButton(ui("×"), quotePreview_, "clearQuote");
     clearQuote->setProperty("accessibleName", ui("Убрать цитату"));
     clearQuote->setFixedWidth(40);
+    clearQuote->setFocusPolicy(Qt::TabFocus);
     preview->addWidget(quoteText_, 1);
     preview->addWidget(clearQuote);
     page->addWidget(quotePreview_);
@@ -1576,6 +1613,7 @@ ChatView::ChatView(QWidget* parent)
     composer_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     composer_->setFixedHeight(59);
     keyboardWatch_ = new QTimer(this);
+    composer_->installEventFilter(this);
     emojiButton_ = makeButton(QString(), this, "emojiButton");
     emojiButton_->setProperty("accessibleName", ui("Смайлики"));
     emojiButton_->setToolTip(ui("Смайлики"));
@@ -1589,6 +1627,8 @@ ChatView::ChatView(QWidget* parent)
     attachmentButton_->setIconSize(QSize(22, 22));
     attachmentButton_->hide();
     sendButton_ = makeButton(ui("Отправить"), this, "sendMessage");
+    for (auto* button : {emojiButton_, attachmentButton_, sendButton_})
+        button->setFocusPolicy(Qt::TabFocus);
     input->addWidget(composer_, 1);
     input->addWidget(emojiButton_);
     input->addWidget(attachmentButton_);
@@ -1614,23 +1654,68 @@ ChatView::ChatView(QWidget* parent)
 }
 
 void ChatView::composerFocusChanged(QWidget* previous, QWidget* focus) {
-    if (previous != composer_ && focus != composer_)
+    if (previous != composer_ && focus != composer_ && !keyboardWatch_->isActive())
+        return;
+    // The native editor can momentarily take Qt focus when opening the FEP.
+    if (!focus && keyboardWatch_->isActive())
         return;
     const bool split = focus == composer_ && !NativeKeyboard::fullScreenPreferred();
-    if (NativeKeyboard::setSplitMode(focus, split))
+    if (NativeKeyboard::setSplitMode(focus, split)) {
+        if (!keyboardWatch_->isActive()) {
+            NativeKeyboard::takePanelEvent();
+            keyboardTouchActive_ = NativeKeyboard::touchInputActive();
+        }
         keyboardWatch_->start(keyboardWatchMs);
-    else
+    } else {
         keyboardWatch_->stop();
+        keyboardPanelOpen_ = false;
+    }
     updateKeyboardInset();
 }
 
+bool ChatView::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == composer_ && keyboardWatch_->isActive()) {
+        const bool opening = event->type() == QEvent::RequestSoftwareInputPanel;
+        if (opening || event->type() == QEvent::CloseSoftwareInputPanel) {
+            NativeKeyboard::takePanelEvent();
+            keyboardTouchActive_ = NativeKeyboard::touchInputActive();
+            keyboardPanelOpen_ = opening;
+            updateKeyboardInset();
+        } else if (event->type() == QEvent::Hide) {
+            keyboardWatch_->stop();
+            keyboardPanelOpen_ = false;
+            NativeKeyboard::setSplitMode(nullptr, false);
+            updateKeyboardInset();
+        }
+    }
+    return QWidget::eventFilter(watched, event);
+}
+
 void ChatView::updateKeyboardInset() {
-    const int visibleBottom = keyboardWatch_->isActive() && isVisible() ? NativeKeyboard::splitViewBottom() : -1;
+    QLayout* page = layout();
+    const QMargins margins = page->contentsMargins();
     int bottom = chatBottomMargin;
-    if (visibleBottom >= 0)
-        bottom += qMax(0, mapToGlobal(QPoint(0, height())).y() - visibleBottom);
-    if (layout()->contentsMargins().bottom() != bottom)
-        layout()->setContentsMargins(8, 5, 8, bottom);
+    if (keyboardWatch_->isActive() && isVisible()) {
+        const auto panelEvent = NativeKeyboard::takePanelEvent();
+        const int touchActive = NativeKeyboard::touchInputActive();
+        if (panelEvent != NativeKeyboard::PanelEvent::None)
+            keyboardPanelOpen_ = panelEvent == NativeKeyboard::PanelEvent::Open;
+        else if (touchActive >= 0 && touchActive != keyboardTouchActive_ &&
+                 (touchActive == 1 || keyboardTouchActive_ == 1))
+            keyboardPanelOpen_ = touchActive != 0;
+        if (touchActive >= 0)
+            keyboardTouchActive_ = touchActive;
+        if (keyboardPanelOpen_) {
+            const int visibleBottom = NativeKeyboard::splitViewBottom(QApplication::desktop()->screenGeometry(window()));
+            if (visibleBottom >= 0) {
+                const int overlap = mapToGlobal(QPoint(0, height())).y() - visibleBottom;
+                const int maxInset = height() - page->minimumSize().height() + margins.bottom() - chatBottomMargin;
+                bottom += qBound(0, overlap, qMax(0, maxInset));
+            }
+        }
+    }
+    if (margins.bottom() != bottom)
+        page->setContentsMargins(margins.left(), margins.top(), margins.right(), bottom);
 }
 
 void ChatView::syncLinkPreviewMode() {
@@ -1682,10 +1767,13 @@ void ChatView::setAppearance(const Appearance::Palette& palette, int chatTextSiz
         "#nativeChat QPushButton:pressed { background: @selection; }"
         "#nativeChat QPushButton:disabled, #nativeChat QPushButton#sendMessage:disabled { "
         " color: @muted; background: @surface; }"
-        "QMenu#messageActions, QMenu#chatOptions { color: @text; background: @surface;"
+        "QMenu#chatOptions { color: @text; background: @surface;"
         " border: 1px solid @border; }"
-        "QMenu#messageActions::item, QMenu#chatOptions::item { min-height: 32px; padding: 4px 10px; }"
-        "QMenu#messageActions::item:selected, QMenu#chatOptions::item:selected { background: @selection; }"
+        "QMenu#chatOptions::item { min-height: 32px; padding: 4px 10px; }"
+        "QMenu#chatOptions::item:selected { background: @selection; }"
+        "#messageActions QPushButton[messageActionRow=\"true\"] { text-align: left; padding: 4px 10px; }"
+        "#messageActions QPushButton[messageActionRow=\"true\"]:focus { border: 1px solid @accent; }"
+        "#messageActions QPushButton#messageActionBlock[danger=\"true\"] { color: @danger; }"
         "#reactionStrip { background: @chrome; }"
         "#reactionStrip QPushButton { color: @text; background: @surface; border: 1px solid @border;"
         " border-radius: 7px; padding: 0px; }"
@@ -1707,6 +1795,7 @@ void ChatView::setContext(const QString& title, const QString& status, const QSt
     status_->setVisible(!status.isEmpty());
     if (activeId_ == activeId)
         return;
+    dismissMessageActions(false);
     searchButton_->setChecked(false);
     activeId_ = activeId;
     attachmentButton_->setVisible(!activeId_.isEmpty() && Attachments::ready());
@@ -1731,6 +1820,7 @@ void ChatView::setMessages(const QVector<ChatMessage>& messages, bool opening) {
     hasDeferredMessages_ = false;
     deferredMessages_.clear();
     if (opening) {
+        dismissMessageActions(false);
         searchButton_->setChecked(false);
         attachmentButton_->setVisible(!activeId_.isEmpty() && Attachments::ready());
         syncChatBackground();
@@ -1967,17 +2057,22 @@ void ChatView::insertAttachment(const QString& link) {
 }
 
 void ChatView::send() {
+#ifdef Q_OS_SYMBIAN
+    if (composer_->hasFocus()) {
+        if (QInputContext* context = composer_->inputContext())
+            context->reset();
+    }
+#endif
     if (sendButton_->isEnabled())
         emit sendRequested(outgoingText(composerText()));
 }
 
-void ChatView::queueMessageActions(int index, const QPoint& globalPosition, bool blockedRun,
-                                   const QString& reactionEmoji) {
-    if (index < 0 || index >= messages_.size())
+void ChatView::queueMessageActions(int index, bool blockedRun, const QString& reactionEmoji) {
+    if (index < 0 || index >= messages_.size() || !isVisible() || activeId_.isEmpty() ||
+            messageActions_ || !actionTarget_.isEmpty())
         return;
     actionMessage_ = messages_.at(index);
     actionTarget_ = activeId_;
-    actionPosition_ = globalPosition;
     actionBlockedRun_ = blockedRun;
     actionReaction_ = reactionEmoji;
     actionNewerTexts_.clear();
@@ -1992,35 +2087,44 @@ void ChatView::queueMessageActions(int index, const QPoint& globalPosition, bool
 }
 
 void ChatView::showMessageActions() {
-    if (actionTarget_.isEmpty() || actionTarget_ != activeId_)
+    if (actionTarget_.isEmpty() || actionTarget_ != activeId_ || !isVisible() || messageActions_)
         return;
-    const ChatMessage message = actionMessage_;
-    const QStringList newer = actionNewerTexts_;
-    const QString target = actionTarget_;
-    const QString reaction = actionReaction_;
-    actionTarget_.clear();
-    actionReaction_.clear();
+    const ChatMessage& message = actionMessage_;
     if (actionBlockedRun_) {
+        actionTarget_.clear();
         history_->toggleBlockedRun(message);
         return;
     }
-    if (!reaction.isEmpty()) {
-        showReactionAuthors(message, reaction);
+    if (!actionReaction_.isEmpty()) {
+        const ChatMessage selected = message;
+        const QString reaction = actionReaction_;
+        actionTarget_.clear();
+        actionReaction_.clear();
+        showReactionAuthors(selected, reaction);
         return;
     }
 
-    QMenu menu(this);
-    menu.setObjectName(QLatin1String("messageActions"));
-    QSignalMapper quick(&menu);
-    reactionChoice_ = -1;
-    QAction* deleteReaction = 0;
+    QWidget* content = new QWidget(this);
+    content->setObjectName(QLatin1String("messageActions"));
+    QVBoxLayout* actions = new QVBoxLayout(content);
+    actions->setContentsMargins(0, 0, 0, 0);
+    actions->setSpacing(4);
+    const auto addRow = [this, content, actions](MessageMenuAction choice, const char* name,
+                                                 const QString& text) {
+        QPushButton* row = makeButton(text, content, name);
+        row->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        row->setProperty("messageMenuAction", int(choice));
+        row->setProperty("messageActionRow", true);
+        connect(row, SIGNAL(clicked()), this, SLOT(selectMessageAction()), Qt::QueuedConnection);
+        actions->addWidget(row);
+        return row;
+    };
     if (message.canReact) {
-        QWidgetAction* action = new QWidgetAction(&menu);
-        QWidget* strip = new QWidget;
+        QWidget* strip = new QWidget(content);
         strip->setObjectName(QLatin1String("reactionStrip"));
         strip->setAttribute(Qt::WA_StyledBackground);
         QHBoxLayout* layout = new QHBoxLayout(strip);
-        layout->setContentsMargins(6, 5, 6, 5);
+        layout->setContentsMargins(4, 5, 4, 5);
         layout->setSpacing(4);
         const char* names[] = {"Палец вверх", "Сердце", "Смех", "Удивление", "Грусть", "Спасибо"};
         for (int i = 0; i <= moreReactions; ++i) {
@@ -2028,60 +2132,106 @@ void ChatView::showMessageActions() {
             QPushButton* tile = new QPushButton(more ? QLatin1String("+") : QString(), strip);
             tile->setObjectName(QLatin1String("quickReaction-") + QString::number(i));
             tile->setProperty("accessibleName", more ? ui("Другие реакции") : ui(names[i]));
-            tile->setFixedSize(37, 39);
+            tile->setProperty("messageMenuAction", FirstQuickReaction + i);
+            tile->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+            tile->setMinimumWidth(30);
+            tile->setFixedHeight(39);
             if (!more) {
                 const int index = quickReactions[i];
                 tile->setIcon(QIcon(QPixmap::fromImage(emojiImage(index))));
                 tile->setIconSize(QSize(23, 23));
                 tile->setProperty("own", ownsReaction(message, ChatFeatures::emojiValue(index)));
             }
-            quick.setMapping(tile, i);
-            connect(tile, SIGNAL(clicked()), &quick, SLOT(map()));
+            connect(tile, SIGNAL(clicked()), this, SLOT(selectMessageAction()), Qt::QueuedConnection);
             layout->addWidget(tile);
         }
-        action->setDefaultWidget(strip);
-        menu.addAction(action);
-        connect(&quick, SIGNAL(mapped(int)), this, SLOT(selectQuickReaction(int)));
-        connect(&quick, SIGNAL(mapped(int)), &menu, SLOT(close()));
-        menu.addSeparator();
+        actions->addWidget(strip);
         if (ownsReaction(message))
-            deleteReaction = menu.addAction(ui("Убрать реакцию"));
+            addRow(RemoveReaction, "messageActionRemoveReaction", ui("Убрать реакцию"));
     }
-    QAction* reply = menu.addAction(ui("Ответить"));
-    QAction* repeat = message.outgoing ? menu.addAction(ui("Отправить заново")) : 0;
-    if (repeat)
+    addRow(Reply, "messageActionReply", ui("Ответить"));
+    if (message.outgoing) {
+        QPushButton* repeat = addRow(Resend, "messageActionResend", ui("Отправить заново"));
         repeat->setEnabled(canSend_ && maxBytes_ > 0 && message.text.toUtf8().size() <= maxBytes_);
-    QAction* people = std::any_of(message.reactions.constBegin(), message.reactions.constEnd(), visibleReaction)
-        ? menu.addAction(ui("Кто поставил реакции")) : 0;
-    QAction* details = menu.addAction(ui("Подробности"));
-    QAction* block = 0;
-    if (!message.blockId.isEmpty()) {
-        menu.addSeparator();
-        block = menu.addAction((message.blocked ? ui("Разблокировать «%1»") : ui("Заблокировать «%1»"))
-            .arg(message.author.left(nameLimit).replace(QLatin1String("&"), QLatin1String("&&"))));
     }
-    QAction* selected = menu.exec(actionPosition_);
-    const int chosenReaction = reactionChoice_;
-    reactionChoice_ = -1;
-    if (activeId_ != target)
+    if (std::any_of(message.reactions.constBegin(), message.reactions.constEnd(), visibleReaction))
+        addRow(ReactionPeople, "messageActionPeople", ui("Кто поставил реакции"));
+    addRow(MessageDetails, "messageActionDetails", ui("Подробности"));
+    if (!message.blockId.isEmpty()) {
+        QPushButton* block = addRow(BlockSender, "messageActionBlock",
+            (message.blocked ? ui("Разблокировать «%1»") : ui("Заблокировать «%1»"))
+                .arg(message.author.left(nameLimit).replace(QLatin1String("&"), QLatin1String("&&"))));
+        block->setProperty("danger", !message.blocked);
+    }
+    messageActions_ = showCompactSheet(this, content, ui("Действия с сообщением"),
+                                      SLOT(closeMessageActions()), [this] { closeMessageActions(); });
+    messageActions_->setObjectName(QLatin1String("messageActionsOverlay"));
+}
+
+bool ChatView::dismissMessageActions(bool animate) {
+    if (!messageActions_)
+        return false;
+    QWidget* sheet = messageActions_.data();
+    messageActions_ = nullptr;
+    actionTarget_.clear();
+    dismissCompactSheet(sheet, animate);
+    if (animate && isVisible())
+        history_->setFocus(Qt::OtherFocusReason);
+    return true;
+}
+
+void ChatView::closeMessageActions() {
+    dismissMessageActions();
+}
+
+void ChatView::hideEvent(QHideEvent* event) {
+    dismissMessageActions(false);
+    actionTarget_.clear();
+    QWidget::hideEvent(event);
+}
+
+void ChatView::selectMessageAction() {
+    auto* button = qobject_cast<QPushButton*>(sender());
+    if (!button || !button->isEnabled() || !messageActions_ || !messageActions_->isAncestorOf(button))
         return;
-    if (message.canReact && chosenReaction >= 0 && chosenReaction < moreReactions) {
-        reactTo(message, ChatFeatures::emojiValue(quickReactions[chosenReaction]));
-    } else if (message.canReact && chosenReaction == moreReactions) {
-        const int index = pickEmoji(ui("Выбрать реакцию"));
-        if (index >= 0 && activeId_ == target)
-            reactTo(message, ChatFeatures::emojiValue(index));
-    } else if (selected && selected == deleteReaction) {
+    const int choice = button->property("messageMenuAction").toInt();
+    const ChatMessage message = actionMessage_;
+    const QStringList newer = actionNewerTexts_;
+    const QString target = actionTarget_;
+    dismissMessageActions(false);
+    if (target != activeId_ || !isVisible())
+        return;
+
+    if (choice >= FirstQuickReaction) {
+        const int quick = choice - FirstQuickReaction;
+        if (quick < moreReactions)
+            reactTo(message, ChatFeatures::emojiValue(quickReactions[quick]));
+        else if (quick == moreReactions) {
+            const int index = pickEmoji(ui("Выбрать реакцию"));
+            if (index >= 0 && activeId_ == target)
+                reactTo(message, ChatFeatures::emojiValue(index));
+        }
+        return;
+    }
+
+    switch (choice) {
+    case RemoveReaction:
         emit reactionRequested(message, QString());
-    } else if (selected == reply) {
+        break;
+    case Reply:
         replyTo(message, newer);
-    } else if (selected && selected == repeat && canSend_) {
-        emit resendRequested(message.text);
-    } else if (selected && selected == people) {
+        break;
+    case Resend:
+        if (canSend_ && maxBytes_ > 0 && message.text.toUtf8().size() <= maxBytes_)
+            emit resendRequested(message.text);
+        break;
+    case ReactionPeople:
         showReactionAuthors(message);
-    } else if (selected == details) {
+        break;
+    case MessageDetails:
         showDetails(message);
-    } else if (selected && selected == block) {
+        break;
+    case BlockSender: {
         const bool byName = message.blockId.startsWith(QLatin1String("n:"));
         const QString confirmation = byName
             ? ui("Скрыть сообщения всех, кто подписывается именем «%1»?").arg(message.author)
@@ -2092,11 +2242,9 @@ void ChatView::showMessageActions() {
                 activeId_ == target) {
             emit senderBlockRequested(message.blockId, message.author, !message.blocked);
         }
+        break;
     }
-}
-
-void ChatView::selectQuickReaction(int choice) {
-    reactionChoice_ = choice;
+    }
 }
 
 void ChatView::reactTo(const ChatMessage& message, const QString& emoji) {

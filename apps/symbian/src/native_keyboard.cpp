@@ -7,8 +7,8 @@
 #include <QtCore/QSettings>
 
 #ifdef Q_OS_SYMBIAN
-#include <QtGui/QApplication>
 #include <QtGui/QInputContext>
+#include <QtGui/QSymbianEvent>
 #include <QtGui/QWidget>
 #include <e32property.h>
 #include <eikappui.h>
@@ -16,6 +16,26 @@
 #endif
 
 namespace NativeKeyboard {
+
+#ifdef Q_OS_SYMBIAN
+namespace {
+
+// Avkon resource changes recognized by Symbian Qt's split-view input context.
+const int splitViewOpenEvent = 0x2001E2C0;
+const int splitViewCloseEvent = 0x2001E2C1;
+
+} // namespace
+
+bool Application::symbianEventFilter(const QSymbianEvent* event) {
+    if (event->type() == QSymbianEvent::ResourceChangeEvent) {
+        if (event->resourceChangeType() == splitViewOpenEvent)
+            pendingEvent_ = PanelEvent::Open;
+        else if (event->resourceChangeType() == splitViewCloseEvent)
+            pendingEvent_ = PanelEvent::Closed;
+    }
+    return false;
+}
+#endif
 
 bool fullScreenPreferred() {
     return QSettings().value(QLatin1String(FullScreenPreference), false).toBool();
@@ -40,23 +60,42 @@ bool setSplitMode(QWidget* focusedEditor, bool split) {
 #endif
 }
 
-int splitViewBottom() {
+PanelEvent takePanelEvent() {
+#ifdef Q_OS_SYMBIAN
+    if (auto* app = static_cast<Application*>(QCoreApplication::instance())) {
+        const PanelEvent event = app->pendingEvent_;
+        app->pendingEvent_ = PanelEvent::None;
+        return event;
+    }
+#endif
+    return PanelEvent::None;
+}
+
+int touchInputActive() {
 #ifdef Q_OS_SYMBIAN
     // The Symbian Qt input context uses this Avkon property to detect the input panel.
     const TUid fep = {0x100056de};
-    const TUint touchInputActive = 4;
+    const TUint activeKey = 4;
     TInt active = 0;
-    if (RProperty::Get(fep, touchInputActive, active) != KErrNone || active == 0)
-        return -1;
+    if (RProperty::Get(fep, activeKey, active) == KErrNone)
+        return active != 0;
+#endif
+    return -1;
+}
+
+int splitViewBottom(const QRect& screen) {
+    int clientBottom = -1;
+#ifdef Q_OS_SYMBIAN
     const CEikonEnv* environment = CEikonEnv::Static();
     const CEikAppUi* application = environment ? environment->EikAppUi() : nullptr;
     if (application) {
         const TRect clientRect = application->ClientRect();
+        // Some Belle layouts report the ordinary app area while the panel is open.
         if (clientRect.Height() > 0)
-            return clientRect.iBr.iY;
+            clientBottom = clientRect.iBr.iY;
     }
 #endif
-    return -1;
+    return splitViewBottomForClient(screen, clientBottom);
 }
 
 } // namespace NativeKeyboard

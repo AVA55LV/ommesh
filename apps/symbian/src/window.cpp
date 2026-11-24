@@ -1086,6 +1086,18 @@ private:
     bool fullHeight_ = false;
 };
 
+QWidget* showCompactSheet(QWidget* owner, QWidget* content, const QString& title,
+                          const char* closeSlot, const std::function<void()>& close) {
+    auto* sheet = new BottomSheet(owner, content, title, false, close);
+    QObject::connect(sheet->closeButton(), SIGNAL(clicked()), owner, closeSlot, Qt::QueuedConnection);
+    sheet->closeButton()->setFocus(Qt::OtherFocusReason);
+    return sheet;
+}
+
+void dismissCompactSheet(QWidget* sheet, bool animate) {
+    static_cast<BottomSheet*>(sheet)->dismiss(animate);
+}
+
 void ClientWindow::applyAppearance(int theme, int chatTextSize) {
     const Appearance::Theme selected = Appearance::checkedTheme(theme);
     const int size = Appearance::checkedChatTextSize(chatTextSize);
@@ -2667,8 +2679,10 @@ void ClientWindow::keyPressEvent(QKeyEvent* event) {
 
     if (chatSheet_)
         closeChatOptions();
-    else if (pages_->currentWidget() == chatPage_)
-        returnToDashboard();
+    else if (pages_->currentWidget() == chatPage_) {
+        if (!chatPage_->dismissMessageActions())
+            returnToDashboard();
+    }
     else if (pages_->currentWidget() == connectionPage_ || pages_->currentWidget() == detailPage_)
         returnToDashboard();
     else if (tab_ == Network && networkSheet_)
