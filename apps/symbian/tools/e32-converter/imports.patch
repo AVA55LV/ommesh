@@ -6,9 +6,9 @@
  
 +// Keep ELF import validation bounded. The Qt virtual methods used by Belle
 +// can occupy multiple code slots for the same DLL ordinal.
-+constexpr size_t kMaxElfImportSlots = 2560;
-+constexpr uint32_t kMaxElfLibraryImports = 2048;
-+constexpr size_t kMaxElfImportSectionSize = 13 * 1024;
++constexpr size_t kMaxElfImportSlots = 3328;
++constexpr uint32_t kMaxElfLibraryImports = 2304;
++constexpr size_t kMaxElfImportSectionSize = 16 * 1024;
 +
  absl::StatusOr<std::string> StringAt(std::string_view table, size_t offset) {
    if (offset >= table.size()) {
@@ -37,7 +37,7 @@
      if (data_relocs.flags != 2 || data_relocs.info != 0 ||
          data_relocs.entry_size != 8 || data_relocs.size == 0 ||
 -        data_relocs.size > 256 * 8 || data_relocs.size % 8) {
-+        data_relocs.size > 1536 * 8 || data_relocs.size % 8) {
++        data_relocs.size > 2048 * 8 || data_relocs.size % 8) {
        return absl::DataLossError("Invalid imported data relocation table");
      }
      expected.emplace(17, data_relocs.address);  // DT_REL

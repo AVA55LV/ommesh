@@ -5,6 +5,8 @@ class CHWRMVibra;
 
 class NativeVibration {
 public:
+    enum Failure { ProfileDisabled = -21, SystemLocked = -22 };
+
     NativeVibration() = default;
     NativeVibration(const NativeVibration&) = delete;
     NativeVibration& operator=(const NativeVibration&) = delete;

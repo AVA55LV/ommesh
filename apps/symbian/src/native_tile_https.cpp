@@ -23,6 +23,7 @@
 
 #include "native_tile_ca.hpp"
 #include "native_preview_ca.hpp"
+#include "native_attachment_ca.hpp"
 
 namespace {
 
@@ -31,7 +32,7 @@ namespace net = symbian::api::connectivity;
 
 constexpr char kHost[] = "tile.openstreetmap.org";
 constexpr char kPreviewHost[] = "preview.ommesh.ru";
-constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.19 (+https://github.com/cm4ker/ommesh)";
+constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.24 (+https://github.com/cm4ker/ommesh)";
 constexpr int kMaximumTileBytes = 160 * 1024;
 constexpr std::size_t kNativeIoLimit = 32 * 1024;
 constexpr char kPng256Header[] =
@@ -370,5 +371,74 @@ QByteArray fetchOmmeshLinkPreview(const QByteArray& encodedUrl, const QAtomicInt
         body.append((**bytes).data(), static_cast<int>((**bytes).size()));
     }
     return QByteArray();
+}
+
+int transferAttachment(const QUrl& address, bool put, const QByteArray& contentType,
+                       const QByteArray& disposition, const QByteArray& body,
+                       const QByteArray& customCa, const QAtomicInt* cancellation) {
+    const QByteArray host = QUrl::toAce(address.host()).toLower();
+    const int port = address.port(443);
+    if (address.scheme() != QLatin1String("https") || host.isEmpty() || port < 1 || port > 65535 ||
+            !address.userName().isEmpty() || !address.password().isEmpty() ||
+            address.hasFragment() || body.size() > 512 * 1024 || customCa.size() > 64 * 1024)
+        return -1;
+    if (cancelled(cancellation))
+        return -4;
+    const auto failureCode = [cancellation](const absl::Status& status) {
+        if (cancelled(cancellation) || absl::IsCancelled(status))
+            return -4;
+        return absl::IsDeadlineExceeded(status) ? -3 : -1;
+    };
+    const auto deadline = absl::Now() + absl::Seconds(75);
+    auto tcp = net::TcpClient::ConnectHost(host.constData(), static_cast<std::uint16_t>(port),
+                                           absl::Now() + absl::Seconds(8));
+    if (!tcp.ok())
+        return failureCode(tcp.status());
+    auto tls = std::make_unique<TileTlsStream>(std::move(*tcp), cancellation);
+    QByteArray roots(kAmazonRoots);
+    roots.append(kPreviewRoots);
+    roots.append(kTileRoots);
+    roots.append('\n').append(customCa);
+    auto status = tls->open(host.constData(), roots.constData(), roots.size() + 1, false, deadline);
+    if (!status.ok()) {
+        const int error = failureCode(status);
+        return error == -1 ? -2 : error;
+    }
+
+    http::RequestHead outbound;
+    outbound.method = put ? "PUT" : "GET";
+    outbound.scheme = "https";
+    outbound.authority = host.constData();
+    if (port != 443)
+        outbound.authority += ":" + std::to_string(port);
+    const QByteArray path = address.encodedPath();
+    outbound.path = path.isEmpty() ? "/" : std::string(path.constData(), path.size());
+    if (address.hasQuery()) {
+        const QByteArray query = address.encodedQuery();
+        outbound.path += "?" + std::string(query.constData(), query.size());
+    }
+    outbound.headers = {{"user-agent", kUserAgent}, {"accept-encoding", "identity"}};
+    if (put) {
+        addValidator(outbound.headers, "content-type", contentType);
+        addValidator(outbound.headers, "content-disposition", disposition);
+    }
+    http::Limits limits;
+    limits.maximum_body_bytes = 512 * 1024;
+    auto exchange = http::Connection::Client(std::move(tls), std::move(outbound),
+        http::Protocol::kHttp11, limits, put ? static_cast<std::size_t>(body.size()) : 0, deadline);
+    if (!exchange.ok())
+        return failureCode(exchange.status());
+    if (put) {
+        for (int offset = 0; offset < body.size(); offset += 8192) {
+            const int size = std::min(8192, body.size() - offset);
+            status = (*exchange)->Write(std::string_view(body.constData() + offset, size), deadline);
+            if (!status.ok())
+                return failureCode(status);
+        }
+    }
+    status = (*exchange)->Finish(deadline);
+    if (status.ok())
+        status = (*exchange)->ReceiveHeaders(deadline);
+    return status.ok() ? (*exchange)->response().status : failureCode(status);
 }
 #endif

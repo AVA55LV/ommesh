@@ -32,14 +32,14 @@ add_custom_command(
   COMMAND "${QT4_RCC_EXECUTABLE}" -name ommesh_maps -no-compress
     -o "${map_resources}" "${map_resource_dir}/maps.qrc"
   DEPENDS "${map_resource_dir}/maps.qrc"
-    "${map_resource_dir}/omsk.bin" "${map_resource_dir}/omsk-buildings.bin"
+    "${map_resource_dir}/omsk.bin"
     "${map_resource_dir}/omsk-oblast.bin"
     "${map_resource_dir}/siberia.bin" "${map_resource_dir}/world.bin"
   VERBATIM
 )
 
 set(moc_sources)
-foreach(class IN ITEMS client window chat_features node_map radio_settings native_wlan link_preview network_filters network_node_card network_node_management)
+foreach(class IN ITEMS client window chat_features node_map radio_settings native_wlan link_preview network_filters network_node_card network_node_management settings_attachments settings_backup settings_radio_backup settings_radio_editor settings_radio_tools)
   set(header "${CMAKE_CURRENT_SOURCE_DIR}/src/${class}.hpp")
   set(moc_source "${CMAKE_CURRENT_BINARY_DIR}/moc_${class}.cpp")
   add_custom_command(
@@ -66,6 +66,14 @@ symbian_add_executable(ommesh_belle SOURCES
   src/node_chat_options.cpp
   src/radio_console.cpp
   src/radio_settings.cpp
+  src/settings_attachments.cpp
+  src/settings_backup.cpp
+  src/settings_radio_backup.cpp
+  src/radio_backup_archive.cpp
+  src/radio_key_identity.cpp
+  src/backup_history_import.cpp
+  src/settings_radio_editor.cpp
+  src/settings_radio_tools.cpp
   src/native_vibration.cpp
   src/native_wlan.cpp
   src/native_tile_https.cpp

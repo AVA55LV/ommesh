@@ -1,12 +1,14 @@
 #include "network_filters.hpp"
 
+#include "appearance.hpp"
+
 #include <QtCore/QSettings>
 #include <QtCore/QVariant>
 #include <QtGui/QButtonGroup>
-#include <QtGui/QCheckBox>
 #include <QtGui/QComboBox>
 #include <QtGui/QHBoxLayout>
 #include <QtGui/QLabel>
+#include <QtGui/QPainter>
 #include <QtGui/QPushButton>
 #include <QtGui/QVBoxLayout>
 
@@ -90,6 +92,34 @@ struct Choice {
     int id;
     const char* label;
     const char* name;
+};
+
+class FavoritesFirstButton : public QPushButton {
+public:
+    explicit FavoritesFirstButton(QWidget* parent) : QPushButton(ui("Избранные сверху"), parent) {
+        setObjectName(QLatin1String("networkFavoritesFirst"));
+        setCheckable(true);
+        setAutoDefault(false);
+        setMinimumHeight(40);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+
+protected:
+    bool hitButton(const QPoint& position) const override { return rect().contains(position); }
+
+    void paintEvent(QPaintEvent* event) override {
+        QPushButton::paintEvent(event);
+        const Appearance::Palette colors = Appearance::paletteFor(this);
+        const QRect track(width() - 43, (height() - 16) / 2, 32, 16);
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(isChecked() ? colors.accent : Appearance::mix(colors.surface, colors.muted, 45));
+        painter.drawRoundedRect(track, 8, 8);
+        painter.setBrush(isChecked() ? colors.onAccent : colors.text);
+        painter.drawEllipse(QPoint(isChecked() ? track.right() - 7 : track.left() + 8,
+                                   track.center().y()), 5, 5);
+    }
 };
 
 void addChoices(QVBoxLayout* layout, QButtonGroup* group, std::initializer_list<Choice> choices) {
@@ -216,6 +246,7 @@ NetworkFilterPanel::NetworkFilterPanel(const NetworkFilters::Options& options, Q
     setObjectName(QLatin1String("networkFilterPanel"));
     setStyleSheet(QLatin1String(
         "QPushButton[networkFilterChip=\"true\"] { padding: 2px 3px; border-radius: 11px; font-size: 13px; }"
+        "QPushButton#networkFavoritesFirst { padding: 4px 47px 4px 10px; text-align: left; }"
         "QPushButton#networkRefreshContacts { padding: 4px 6px; font-size: 14px; }"
         "QPushButton#networkFilterReset { padding: 4px 9px; font-size: 13px; }"));
 
@@ -263,9 +294,7 @@ NetworkFilterPanel::NetworkFilterPanel(const NetworkFilters::Options& options, Q
     orders_->button(Nearest)->setToolTip(ui("Для сортировки нужны координаты вашей ноды."));
 
     auto* actions = group(page);
-    favoritesFirst_ = new QCheckBox(ui("Избранные сверху"), actions->parentWidget());
-    favoritesFirst_->setObjectName(QLatin1String("networkFavoritesFirst"));
-    favoritesFirst_->setMinimumHeight(34);
+    favoritesFirst_ = new FavoritesFirstButton(actions->parentWidget());
     actions->addWidget(favoritesFirst_);
     refresh_ = new QPushButton(ui("Загрузить все контакты из радио"), actions->parentWidget());
     refresh_->setObjectName(QLatin1String("networkRefreshContacts"));

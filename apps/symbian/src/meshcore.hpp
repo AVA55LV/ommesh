@@ -58,6 +58,10 @@ struct SelfInfo {
     int codingRate = 0;
     std::int32_t latitude = 0;
     std::int32_t longitude = 0;
+    std::uint8_t multiAcks = 0;
+    std::uint8_t advertLocPolicy = 0;
+    std::uint8_t telemetryModes = 0;
+    std::uint8_t manualAddContacts = 0;
 };
 
 struct Contact {
@@ -69,6 +73,7 @@ struct Contact {
     std::int32_t latitude = 0;
     std::int32_t longitude = 0;
     std::array<std::uint8_t, 64> pathHashes{};
+    std::uint8_t flags = 0;
 };
 
 struct Channel {

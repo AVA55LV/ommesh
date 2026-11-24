@@ -49,6 +49,23 @@ QComboBox* options(QWidget* parent, const char* name) {
     return combo;
 }
 
+class TouchSettingCheckBox : public QCheckBox {
+public:
+    TouchSettingCheckBox(const QString& title, QWidget* parent) : QCheckBox(title, parent) {
+        setMinimumHeight(44);
+        setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    }
+
+    QSize minimumSizeHint() const override { return sizeHint(); }
+
+protected:
+    bool hitButton(const QPoint& position) const override {
+        // The Belle style normally accepts only the native indicator and label rectangle.
+        // Make the entire visible settings row respond to a tap.
+        return rect().contains(position);
+    }
+};
+
 void clearRows(QVBoxLayout* rows) {
     while (QLayoutItem* item = rows->takeAt(0)) {
         if (QWidget* entry = item->widget()) {
@@ -541,8 +558,7 @@ struct NetworkNodeManagementPanel::State {
                 continue;
             }
             if (field.kind == Toggle) {
-                auto* toggle = new QCheckBox(title, body);
-                toggle->setMinimumHeight(38);
+                auto* toggle = new TouchSettingCheckBox(title, body);
                 toggle->setChecked(value == QLatin1String("on"));
                 toggle->setProperty("settingName", key);
                 toggle->setObjectName(key);
@@ -586,7 +602,7 @@ NetworkNodeManagementPanel::NetworkNodeManagementPanel(Client& client, const Net
     s.status = caption(QString(), this);
     s.status->setObjectName(QLatin1String("networkManagementStatus"));
     layout->addWidget(s.status);
-    s.refresh = action(ui("Запросить у узла"), this, "networkManagementRefresh");
+    s.refresh = action(ui("Запросить"), this, "networkManagementRefresh");
     connect(s.refresh, SIGNAL(clicked()), this, SLOT(refresh()), Qt::QueuedConnection);
     auto* header = new QHBoxLayout;
     header->setSpacing(6);

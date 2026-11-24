@@ -20,6 +20,8 @@ from prepare_belle_executable import (
     uid_checksum,
 )
 
+NOKIA_BELLE_PLATFORM_UID = 0x2003A678
+
 
 def create_package(args: argparse.Namespace) -> None:
     project = Path(__file__).resolve().parents[1]
@@ -35,7 +37,7 @@ def create_package(args: argparse.Namespace) -> None:
         or struct.unpack_from("<2I", executable, 56) != (HEAP_MIN, HEAP_MAX)
     ):
         raise ValueError("Expected the OMMesh executable from CMake target ommesh_belle_compat")
-    for name in ("omsk.bin", "omsk-buildings.bin", "omsk-oblast.bin", "siberia.bin", "world.bin"):
+    for name in ("omsk.bin", "omsk-oblast.bin", "siberia.bin", "world.bin"):
         atlas = (project / "resources/maps" / name).read_bytes()
         if not atlas or atlas not in executable:
             raise ValueError(f"The OMMesh executable is missing the embedded map {name}")
@@ -53,6 +55,7 @@ def create_package(args: argparse.Namespace) -> None:
             f'#{{"{name}"}},({package["uid"]:#010x}),{major},{minor},{build}',
             f'%{{"{vendor}"}}',
             f':"{vendor}"',
+            f'[{NOKIA_BELLE_PLATFORM_UID:#010x}],0,0,0,{{"S60ProductID"}}',
         ]
         for index, (target, payload) in enumerate(files):
             source = f"payload-{index}"

@@ -13,6 +13,8 @@ enum Field { Notifications, Sound, Background };
 
 QString label(Field field, const QString& target, bool room);
 bool choose(Field field, const QString& target, bool room, QWidget* parent);
+QString defaultLabel(Field field);
+bool chooseDefault(Field field, QWidget* parent);
 bool allowsNotification(const QSettings& settings, const QString& target, bool room,
                         const QString& message, const QString& ownName);
 void playNotification(const QSettings& settings, const QString& target);

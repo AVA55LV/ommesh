@@ -4,6 +4,7 @@
 #include <QtCore/QAtomicInt>
 #include <QtCore/QByteArray>
 #include <QtCore/QString>
+#include <QtCore/QUrl>
 
 struct TileHttpsRequest {
     int z = 0;
@@ -33,6 +34,11 @@ TileHttpsResult fetchOsmTile(const TileHttpsRequest& request);
 
 #ifdef Q_OS_SYMBIAN
 QByteArray fetchOmmeshLinkPreview(const QByteArray& encodedUrl, const QAtomicInt* cancelled, int maximumBytes);
+
+// Strictly verified HTTPS with no redirects. Test reads never receive the signed PUT address.
+int transferAttachment(const QUrl& address, bool put, const QByteArray& contentType,
+                       const QByteArray& disposition, const QByteArray& body,
+                       const QByteArray& customCa, const QAtomicInt* cancelled);
 #endif
 
 #endif

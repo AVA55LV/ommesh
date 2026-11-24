@@ -2,6 +2,8 @@
 #include "link_preview.hpp"
 #include "message_text.hpp"
 #include "node_chat_options.hpp"
+#include "settings_attachments.hpp"
+#include "settings_icons.hpp"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QCryptographicHash>
@@ -1476,9 +1478,16 @@ ChatView::ChatView(QWidget* parent)
     emojiButton_->setFixedWidth(44);
     emojiButton_->setIcon(QIcon(QPixmap::fromImage(emojiImage(0))));
     emojiButton_->setIconSize(QSize(24, 24));
+    attachmentButton_ = makeButton(QString(), this, "attachFile");
+    attachmentButton_->setProperty("accessibleName", ui("Прикрепить файл"));
+    attachmentButton_->setToolTip(ui("Прикрепить файл"));
+    attachmentButton_->setFixedWidth(42);
+    attachmentButton_->setIconSize(QSize(22, 22));
+    attachmentButton_->hide();
     sendButton_ = makeButton(ui("Отправить"), this, "sendMessage");
     input->addWidget(composer_, 1);
     input->addWidget(emojiButton_);
+    input->addWidget(attachmentButton_);
     input->addWidget(sendButton_);
     page->addLayout(input);
 
@@ -1486,6 +1495,7 @@ ChatView::ChatView(QWidget* parent)
     connect(pinAction_, SIGNAL(triggered(bool)), this, SIGNAL(pinRequested()));
     connect(clearQuote, SIGNAL(clicked()), this, SLOT(removeQuote()));
     connect(emojiButton_, SIGNAL(clicked()), this, SLOT(chooseEmoji()));
+    connect(attachmentButton_, SIGNAL(clicked()), this, SLOT(chooseAttachment()), Qt::QueuedConnection);
     connect(composer_, SIGNAL(textChanged()), this, SLOT(updateComposer()));
     connect(sendButton_, SIGNAL(clicked()), this, SLOT(send()));
     const Appearance::Preferences appearance = Appearance::preferences();
@@ -1513,6 +1523,7 @@ void ChatView::refreshLinkPreviews() {
 }
 
 void ChatView::setAppearance(const Appearance::Palette& palette, int chatTextSize) {
+    attachmentButton_->setIcon(SettingsIcons::icon(SettingsIcons::Attachments, palette.text));
     palette_ = palette;
     chatTextSize_ = Appearance::checkedChatTextSize(chatTextSize);
     const QString style = paletteStyle(
@@ -1560,6 +1571,7 @@ void ChatView::setContext(const QString& title, const QString& status, const QSt
     if (activeId_ == activeId)
         return;
     activeId_ = activeId;
+    attachmentButton_->setVisible(!activeId_.isEmpty() && Attachments::ready());
     syncChatBackground();
     actionTarget_.clear();
     hasMessageSnapshot_ = false;
@@ -1581,6 +1593,7 @@ void ChatView::setMessages(const QVector<ChatMessage>& messages, bool opening) {
     hasDeferredMessages_ = false;
     deferredMessages_.clear();
     if (opening) {
+        attachmentButton_->setVisible(!activeId_.isEmpty() && Attachments::ready());
         syncChatBackground();
         actionTarget_.clear();
         pendingSentText_.clear();
@@ -1732,8 +1745,32 @@ void ChatView::updateComposer() {
     const int bytes = outgoingText(text).toUtf8().size();
     byteLimit_->setText(maxBytes_ > 0 ? ui("%1 из %2 байт UTF-8").arg(bytes).arg(maxBytes_) : QString());
     byteLimit_->setVisible(maxBytes_ > 0);
+    attachmentButton_->setEnabled(maxBytes_ > 0);
     sendButton_->setEnabled(canSend_ && maxBytes_ > 0 && bytes <= maxBytes_ && !text.trimmed().isEmpty()
                             && !text.contains(QChar(0)));
+}
+
+void ChatView::chooseAttachment() {
+    if (maxBytes_ <= 0 || !Attachments::ready() || activeId_.isEmpty())
+        return;
+    auto* dialog = new AttachmentUploadPanel(outgoingText(composerText()), maxBytes_, this);
+    dialog->setProperty("attachmentChat", activeId_);
+    connect(dialog, SIGNAL(linkReady(QString)), this, SLOT(insertAttachment(QString)));
+    dialog->open();
+}
+
+void ChatView::insertAttachment(const QString& link) {
+    if (!sender() || sender()->property("attachmentChat").toString() != activeId_ || link.isEmpty())
+        return;
+    const QString text = composerText();
+    const QString separator = text.isEmpty() || text.endsWith(QLatin1Char('\n')) ? QString() : QLatin1String("\n");
+    if (outgoingText(text + separator + link).toUtf8().size() > maxBytes_)
+        return;
+    QTextCursor cursor(composer_->document());
+    cursor.movePosition(QTextCursor::End);
+    cursor.insertText(separator + link, QTextCharFormat());
+    composer_->setTextCursor(cursor);
+    composer_->setCurrentCharFormat(QTextCharFormat());
 }
 
 void ChatView::send() {

@@ -1,4 +1,5 @@
 #include "client.hpp"
+#include "radio_key_identity.hpp"
 
 #include <QtCore/QByteArray>
 #include <QtCore/QCryptographicHash>
@@ -27,6 +28,12 @@ constexpr qint64 kInventoryRefreshInterval = 10000;
 constexpr qint64 kInitialReconnectDelay = 1000;
 constexpr qint64 kMaximumReconnectDelay = 30000;
 constexpr qint64 kStableLink = 30000;
+constexpr qint64 kBackupReconnectWindow = 90000;
+constexpr std::uint8_t kExportPrivateKey = 23;
+constexpr std::uint8_t kImportPrivateKey = 24;
+constexpr std::uint8_t kPrivateKeyReply = 0x0e;
+constexpr std::uint8_t kCommandDisabled = 0x0f;
+constexpr int kPrivateKeyBytes = 64;
 constexpr qint64 kRetryGaps[] = {0, 0, 45000, 120000, 300000, 720000, 720000, 720000};
 constexpr int kHistoryLimit = 400;
 constexpr int kContactLimit = 4096;
@@ -38,6 +45,9 @@ constexpr int kRepeatersLimit = 256;
 constexpr int kRouteNameLimit = 24;
 constexpr qint64 kHeardLifetime = 45000;
 constexpr qint64 kEchoLifetime = 900000;
+constexpr std::uint8_t kTrustedContactFlags = 0x0e;
+constexpr std::uint8_t kStatsReply = 24;
+constexpr std::uint8_t kTelemetryReply = 0x8b;
 constexpr int kMissingSnr = std::numeric_limits<int>::min();
 constexpr int kMessageReactionLimit = 32;
 constexpr std::size_t kDeferredReactionLimit = 64;
@@ -55,6 +65,98 @@ template <class ByteArray>
 QByteArray rawBytes(const ByteArray& bytes) {
     return QByteArray(reinterpret_cast<const char*>(bytes.data()),
                       static_cast<int>(bytes.size()));
+}
+
+void appendWireU32(meshcore::Bytes& bytes, quint32 value) {
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        bytes.push_back(static_cast<std::uint8_t>(value >> shift));
+}
+
+bool isRadioSettingsWrite(const meshcore::Bytes& command) {
+    if (command.empty())
+        return false;
+    const auto bytes = command.size();
+    switch (command.front()) {
+    case 6: return bytes == 5;       // SetDeviceTime
+    case 8: return bytes >= 2 && bytes <= 32; // SetAdvertName
+    case 9: return bytes == 144 || bytes == 148; // AddUpdateContact
+    case 11: return bytes == 11 || bytes == 12; // SetRadioParams
+    case 12: return bytes == 2;      // SetRadioTxPower
+    case 14: return bytes == 9;      // SetAdvertLatLon
+    case 15: return bytes == 33;     // RemoveContact
+    case 37: return bytes == 5;      // SetDevicePin
+    case 38: return bytes >= 2 && bytes <= 5; // SetOtherParams
+    case 58: return bytes == 2 || bytes == 3; // SetAutoAddConfig
+    case 61: return bytes == 3;     // SetPathHashMode
+    default: return false;
+    }
+}
+
+bool validRadioBackupKey(const QString& publicKey) {
+    const auto hex = publicKey.toLatin1();
+    const auto key = QByteArray::fromHex(hex);
+    return key.size() == 32 && key != QByteArray(32, '\0') && key.toHex() == hex;
+}
+
+quint32 radioBackupU32(const meshcore::Bytes& bytes, std::size_t offset) {
+    quint32 value = 0;
+    for (unsigned i = 0; i < 4; ++i)
+        value |= static_cast<quint32>(bytes[offset + i]) << (8 * i);
+    return value;
+}
+
+bool radioBackupCoordinates(qint32 latitude, qint32 longitude) {
+    return latitude >= -90000000 && latitude <= 90000000 &&
+           longitude >= -180000000 && longitude <= 180000000;
+}
+
+bool validRadioBackupSetting(const meshcore::Bytes& command) {
+    if (!isRadioSettingsWrite(command))
+        return false;
+    switch (command.front()) {
+    case 8: {
+        const auto bytes = rawBytes(command).mid(1);
+        return !bytes.contains('\0') && QString::fromUtf8(bytes.constData(), bytes.size()).toUtf8() == bytes;
+    }
+    case 11: {
+        const auto frequency = radioBackupU32(command, 1);
+        const auto bandwidth = radioBackupU32(command, 5);
+        return frequency >= 150000 && frequency <= 2500000 && bandwidth >= 7000 && bandwidth <= 500000 &&
+               command[9] >= 5 && command[9] <= 12 && command[10] >= 5 && command[10] <= 8 &&
+               (command.size() == 11 || command[11] <= 1);
+    }
+    case 12: return static_cast<qint8>(command[1]) >= -9;
+    case 14: return radioBackupCoordinates(static_cast<qint32>(radioBackupU32(command, 1)),
+                                          static_cast<qint32>(radioBackupU32(command, 5)));
+    case 38:
+    case 58: return true;
+    case 61: return command[1] == 0 && command[2] < 3;
+    default: return false;
+    }
+}
+
+meshcore::Bytes addUpdateContactCommand(const meshcore::Contact& contact, std::uint8_t flags) {
+    meshcore::Bytes command{9};
+    command.insert(command.end(), contact.key.begin(), contact.key.end());
+    command.insert(command.end(), {contact.type, flags, contact.path});
+    command.insert(command.end(), contact.pathHashes.begin(), contact.pathHashes.end());
+    const auto nameBytes = std::min<std::size_t>(32, contact.name.size());
+    command.insert(command.end(), contact.name.begin(), contact.name.begin() + nameBytes);
+    command.resize(132, 0);
+    appendWireU32(command, contact.lastAdvert);
+    appendWireU32(command, static_cast<quint32>(contact.latitude));
+    appendWireU32(command, static_cast<quint32>(contact.longitude));
+    return command;
+}
+
+QString radioBackupStage(std::uint8_t command) {
+    if (command == kImportPrivateKey)
+        return russian("Ключ рации");
+    if (command == 32)
+        return russian("Каналы");
+    if (command == 9)
+        return russian("Контакты");
+    return russian("Настройки рации");
 }
 
 QString directId(const meshcore::Prefix& prefix) {
@@ -415,6 +517,12 @@ QString Client::radioParametersSummary() const {
         ? russian("%1 МГц · %2 дБм").arg(decimalMilli(self_.frequencyKhz)).arg(self_.powerDbm)
         : QString();
 }
+const meshcore::SelfInfo& Client::radioIdentity() const { return self_; }
+int Client::radioProtocolVersion() const { return ready_ ? radioProtocolVersion_ : 0; }
+std::optional<bool> Client::radioRepeatEnabled() const { return ready_ ? radioRepeatEnabled_ : std::nullopt; }
+int Client::radioPathHashMode() const { return ready_ && radioPathHashModeKnown_ ? pathHashMode_ : -1; }
+const RadioReadings& Client::radioReadings() const { return radioReadings_; }
+bool Client::radioReadingsPending() const { return radioReadingsStage_ >= 0; }
 QString Client::batteryInfo() const { return battery_.isEmpty() ? russian("Показания ещё не запрошены.") : battery_; }
 int Client::batteryMillivolts() const { return batteryMillivolts_; }
 int Client::lastBatteryMillivolts() const { return lastBatteryMillivolts_; }
@@ -459,11 +567,9 @@ QVector<NetworkNode> Client::nodes() const {
 
 QMap<QString, ChatMessage> Client::latestMessages() const {
     QMap<QString, ChatMessage> result;
-    for (const auto& entry : history_) {
-        if (blocks_.contains(senderBlockId(entry.target, entry.message)))
-            continue;
-        auto current = result.find(entry.target);
-        if (current == result.end() || current.value().timestamp <= entry.message.timestamp)
+    for (auto it = history_.constEnd(); it != history_.constBegin();) {
+        const auto& entry = *--it;
+        if (!result.contains(entry.target) && !blocks_.contains(senderBlockId(entry.target, entry.message)))
             result.insert(entry.target, displayMessage(entry));
     }
     return result;
@@ -592,15 +698,18 @@ QVector<ChatTarget> Client::targets() const {
 
 QVector<ChatMessage> Client::messages(const QString& id) const {
     QVector<ChatMessage> result;
-    for (const auto& entry : history_) {
-        if (entry.target == id)
+    int pendingPosition = 0;
+    for (int i = 0; i < history_.size(); ++i) {
+        const auto& entry = history_.at(i);
+        if (entry.target == id) {
             result.append(displayMessage(entry));
+            if (i < pendingHistoryPosition_)
+                ++pendingPosition;
+        }
     }
     if (!pendingRetry_ && !pendingId_.isEmpty() && pendingId_ == id)
-        result.append(pendingMessage_);
-    std::stable_sort(result.begin(), result.end(), [](const ChatMessage& a, const ChatMessage& b) {
-        return a.timestamp < b.timestamp;
-    });
+        result.insert(pendingPosition, pendingMessage_);
+    // The radio hands up its receive queue in order. Its peers' clocks may disagree.
     return result;
 }
 
@@ -911,6 +1020,7 @@ bool Client::sendNext() {
     const auto timestamp = nextTimestamp();
     pendingId_ = request.id;
     pendingMessage_ = ChatMessage{radioName_, request.text, timestamp, true, russian("Отправка…")};
+    pendingHistoryPosition_ = history_.size();
     pendingKey_ = {};
     pendingEcho_.clear();
     meshcore::Bytes command;
@@ -945,9 +1055,73 @@ bool Client::advertise() {
 bool Client::requestBattery() {
     if (!ready_ || closing_)
         return false;
-    batteryNeeded_ = true;
+    batteryNeeded_ = !radioReadingsPending();
     proceed();
     return true;
+}
+
+bool Client::requestRadioReadings() {
+    if (!ready_ || closing_)
+        return false;
+    if (radioReadingsPending())
+        return true;
+    nextRadioReadings_ = {};
+    radioReadingsStage_ = 0;
+    proceed();
+    emit changed();
+    return true;
+}
+
+bool Client::applyRadioSettings(int requestId, const std::vector<meshcore::Bytes>& commands,
+                               bool readBackIdentity) {
+    if (!ready_ || closing_ || wait_ == Wait::RestartRadio || radioSettingsTransaction_ ||
+        radioBackupTransaction_ || radioBackupKeyRequest_ ||
+        requestId <= 0 || commands.empty() || commands.size() > 8 ||
+        !std::all_of(commands.begin(), commands.end(), isRadioSettingsWrite))
+        return false;
+    radioSettingsTransaction_ = RadioSettingsTransaction{requestId, commands, readBackIdentity};
+    proceed();
+    return true;
+}
+
+bool Client::restartRadio(bool factoryReset) {
+    if (!ready_ || busy() || closing_ || radioSettingsTransaction_ || radioBackupTransaction_ ||
+        radioBackupKeyRequest_ || console_.busy())
+        return false;
+    const meshcore::Bytes command = factoryReset ? meshcore::Bytes{51, 'r', 'e', 's', 'e', 't'}
+                                                 : meshcore::Bytes{19, 'r', 'e', 'b', 'o', 'o', 't'};
+    if (!write(command, Wait::RestartRadio))
+        return false;
+    status_ = russian("Команда отправлена. Ожидание перезапуска рации…");
+    emit changed();
+    return true;
+}
+
+QSet<QString> Client::trustedContactKeys() const {
+    QSet<QString> keys;
+    if (ready_) {
+        for (const auto& contact : contacts_) {
+            if (contact.flags & kTrustedContactFlags)
+                keys.insert(QString::fromLatin1(rawBytes(contact.key).toHex().constData()));
+        }
+    }
+    return keys;
+}
+
+bool Client::setTrustedContact(int requestId, const QString& publicKey, bool enabled) {
+    if (!ready_ || radioProtocolVersion_ < 5 || publicKey.size() != 64)
+        return false;
+    const QByteArray key = QByteArray::fromHex(publicKey.toLatin1());
+    if (key.size() != 32)
+        return false;
+    const auto contact = std::find_if(contacts_.begin(), contacts_.end(), [&](const meshcore::Contact& entry) {
+        return rawBytes(entry.key) == key;
+    });
+    if (contact == contacts_.end() || (contact->type != 1 && (enabled || !(contact->flags & kTrustedContactFlags))))
+        return false;
+    const auto flags = static_cast<std::uint8_t>(enabled ? contact->flags | kTrustedContactFlags
+                                                        : contact->flags & ~kTrustedContactFlags);
+    return applyRadioSettings(requestId, {addUpdateContactCommand(*contact, flags)}, false);
 }
 
 QVector<RadioChannel> Client::radioChannels() const {
@@ -968,8 +1142,167 @@ QVector<RadioChannel> Client::radioChannels() const {
     return result;
 }
 
+int Client::radioBackupMessageCount() const { return history_.size(); }
+
+std::optional<RadioBackupSnapshot> Client::radioBackupSnapshot() const {
+    if (!ready_ || closing_ || !pendingSocketFailure_.isEmpty() || radioBackupTransaction_ ||
+        radioSettingsTransaction_ || channelChangeSlot_ != -1 || !radioContactsComplete_ ||
+        !radioChannelsComplete_ || wait_ == Wait::Contacts || wait_ == Wait::Channel ||
+        inventoryChanged_ || !validRadioBackupKey(radioKey_))
+        return std::nullopt;
+    RadioBackupSnapshot snapshot;
+    snapshot.publicKey = radioKey_;
+    snapshot.identity = self_;
+    snapshot.contacts = contacts_;
+    snapshot.repeatEnabled = radioRepeatEnabled_;
+    snapshot.pathHashMode = radioPathHashMode();
+    snapshot.maxChannels = channelCount_;
+    snapshot.maxContacts = radioMaxContacts_;
+    for (const auto& channel : channels_) {
+        snapshot.channels.append({channel.index, fromWire(channel.name),
+            QString::fromLatin1(rawBytes(channel.key).toHex().constData())});
+    }
+    return snapshot;
+}
+
+bool Client::requestRadioBackupKey(int requestId, const QString& expectedTarget) {
+    if (!ready_ || closing_ || !pendingSocketFailure_.isEmpty() || requestId <= 0 ||
+        !validRadioBackupKey(expectedTarget) || expectedTarget != radioKey_ || radioBackupKeyRequest_ ||
+        radioBackupTransaction_ || radioSettingsTransaction_ || channelChangeSlot_ != -1 ||
+        console_.busy() || wait_ == Wait::RestartRadio)
+        return false;
+    radioBackupKeyRequest_ = requestId;
+    radioBackupKeyTarget_ = expectedTarget;
+    QTimer::singleShot(0, this, SLOT(tick()));
+    return true;
+}
+
+bool Client::restoreRadioBackup(int requestId, const RadioBackupRestore& copy) {
+    if (!ready_ || closing_ || !pendingSocketFailure_.isEmpty() || requestId <= 0 ||
+        !validRadioBackupKey(copy.expectedTarget) || copy.expectedTarget != radioKey_ ||
+        !validRadioBackupKey(copy.sourcePublicKey) || radioBackupKeyRequest_ || radioBackupTransaction_ ||
+        radioSettingsTransaction_ || channelChangeSlot_ != -1 || wait_ == Wait::RestartRadio ||
+        !radioContactsComplete_ || !radioChannelsComplete_ || console_.busy() ||
+        wait_ == Wait::Contacts || wait_ == Wait::Channel || inventoryChanged_ || refreshNeeded_ ||
+        copy.settings.size() > 7 || copy.channels.size() > 256 || copy.contacts.size() > kContactLimit)
+        return false;
+    if (!copy.privateKey.isEmpty() &&
+        !radioKeyMatchesPublic(copy.privateKey, QByteArray::fromHex(copy.sourcePublicKey.toLatin1())))
+        return false;
+
+    RadioBackupTransaction transaction;
+    transaction.id = requestId;
+    transaction.target = copy.expectedTarget;
+    transaction.source = copy.sourcePublicKey;
+    transaction.host = host_;
+    transaction.port = port_;
+    const bool changeKey = !copy.privateKey.isEmpty() && copy.sourcePublicKey != radioKey_;
+    if (changeKey)
+        transaction.writes.push_back({kImportPrivateKey});
+    QSet<int> settingTypes;
+    for (auto command : copy.settings) {
+        if (!validRadioBackupSetting(command) || settingTypes.contains(command.front()))
+            return false;
+        settingTypes.insert(command.front());
+        if (command.front() == 12 && self_.maxPowerDbm > 0 && static_cast<qint8>(command[1]) > self_.maxPowerDbm)
+            command[1] = static_cast<std::uint8_t>(self_.maxPowerDbm);
+        if (command.front() == 11) {
+            if (!radioRepeatEnabled_ && command.size() == 12)
+                command.pop_back();
+            else if (radioRepeatEnabled_ && command.size() == 11)
+                command.push_back(*radioRepeatEnabled_ ? 1 : 0);
+        }
+        if ((command.front() == 61 && !radioPathHashModeKnown_) ||
+            (command.front() == 58 && radioProtocolVersion_ < 8)) {
+            transaction.skipped = russian("Часть настроек недоступна на этой прошивке");
+            continue;
+        }
+        transaction.writes.push_back(std::move(command));
+    }
+
+    QSet<int> occupiedSlots;
+    QSet<QByteArray> channelKeys;
+    for (const auto& existing : channels_) {
+        occupiedSlots.insert(existing.index);
+        channelKeys.insert(rawBytes(existing.key));
+    }
+    int omittedChannels = 0;
+    for (const auto& channel : copy.channels) {
+        const auto title = channel.title.toUtf8();
+        const auto hex = channel.key.toLatin1();
+        const auto key = QByteArray::fromHex(hex);
+        if (channel.slot < 0 || channel.slot > 255 || title.size() > 31 || title.contains('\0') ||
+            key.size() != 16 || key.toHex() != hex || (title.isEmpty() && key == QByteArray(16, '\0')))
+            return false;
+        if (channelKeys.contains(key))
+            continue;
+        int slot = channel.slot;
+        if (slot >= channelCount_ || occupiedSlots.contains(slot)) {
+            slot = 0;
+            while (slot < channelCount_ && occupiedSlots.contains(slot))
+                ++slot;
+        }
+        if (slot == channelCount_) {
+            ++omittedChannels;
+            continue;
+        }
+        std::array<std::uint8_t, 16> wireKey;
+        std::copy_n(reinterpret_cast<const std::uint8_t*>(key.constData()), wireKey.size(), wireKey.begin());
+        transaction.writes.push_back(meshcore::setChannel(static_cast<std::uint8_t>(slot),
+            {title.constData(), static_cast<std::size_t>(title.size())}, wireKey));
+        occupiedSlots.insert(slot);
+        channelKeys.insert(key);
+    }
+    if (omittedChannels) {
+        if (!transaction.skipped.isEmpty())
+            transaction.skipped += russian(". ");
+        transaction.skipped += russian("Нет места для каналов: %1").arg(omittedChannels);
+    }
+
+    QSet<QByteArray> contactKeys;
+    for (const auto& contact : contacts_)
+        contactKeys.insert(rawBytes(contact.key));
+    int contactCount = contactKeys.size();
+    contactKeys.insert(QByteArray::fromHex(copy.sourcePublicKey.toLatin1()));
+    contactKeys.insert(rawBytes(self_.key));
+    int omittedContacts = 0;
+    for (const auto& contact : copy.contacts) {
+        const auto key = rawBytes(contact.key);
+        const auto name = rawBytes(contact.name);
+        const int pathWidth = (contact.path >> 6) + 1;
+        if (key == QByteArray(32, '\0') || contact.type > 4 || contact.type == 0 ||
+            name.size() > 32 || name.contains('\0') ||
+            QString::fromUtf8(name.constData(), name.size()).toUtf8() != name ||
+            !radioBackupCoordinates(contact.latitude, contact.longitude) ||
+            (contact.path != 0xff && (pathWidth > 3 || pathWidth * (contact.path & 63) > 64)))
+            return false;
+        if (contactKeys.contains(key))
+            continue;
+        contactKeys.insert(key);
+        if (radioMaxContacts_ > 0 && contactCount >= radioMaxContacts_) {
+            ++omittedContacts;
+            continue;
+        }
+        ++contactCount;
+        transaction.writes.push_back(addUpdateContactCommand(contact, contact.flags));
+    }
+    if (omittedContacts) {
+        if (!transaction.skipped.isEmpty())
+            transaction.skipped += russian(". ");
+        transaction.skipped += russian("Нет места для контактов: %1").arg(omittedContacts);
+    }
+    if (changeKey) {
+        transaction.key = copy.privateKey;
+        transaction.key.detach();
+    }
+    radioBackupTransaction_ = std::move(transaction);
+    QTimer::singleShot(0, this, SLOT(tick()));
+    return true;
+}
+
 bool Client::setRadioChannel(int slot, const QString& name, const QString& keyHex) {
-    if (!ready_ || closing_ || slot < 0 || slot >= channelCount_ || channelChangeSlot_ != -1)
+    if (!ready_ || closing_ || slot < 0 || slot >= channelCount_ || channelChangeSlot_ != -1 ||
+        radioBackupKeyRequest_ || radioBackupTransaction_)
         return false;
     const QByteArray title = name.trimmed().toUtf8();
     const QByteArray hex = keyHex.trimmed().toLatin1().toLower();
@@ -1188,21 +1521,25 @@ void Client::socketConnected() {
 
 void Client::readSocket() {
     while (pendingSocketFailure_.isEmpty() && socket_->bytesAvailable() > 0) {
-        const QByteArray chunk = socket_->read(4096);
+        QByteArray chunk = socket_->read(4096);
         if (chunk.isEmpty())
             break;
         if (logFirstReply_) {
             logFirstReply_ = false;
             traceConnection("TCP: first reply bytes", static_cast<int>(chunk.size()));
         }
-        const auto frames = decoder_.feed(
+        auto frames = decoder_.feed(
             {reinterpret_cast<const std::uint8_t*>(chunk.constData()),
              static_cast<std::size_t>(chunk.size())},
             clock_.elapsed());
-        for (const auto& frame : frames) {
+        if (wait_ == Wait::RadioBackupKey)
+            chunk.fill('\0');
+        for (auto& frame : frames) {
             if (!pendingSocketFailure_.isEmpty() || socket_->state() != QAbstractSocket::ConnectedState)
                 return;
             frameReceived(frame);
+            if (!frame.empty() && frame.front() == kPrivateKeyReply)
+                std::fill(frame.begin(), frame.end(), 0);
         }
     }
 }
@@ -1259,6 +1596,11 @@ void Client::tick() {
     if (!pendingSocketFailure_.isEmpty())
         return;
     const qint64 now = clock_.elapsed();
+    if (radioBackupTransaction_ && radioBackupTransaction_->reconnectUntil > 0 &&
+        now >= radioBackupTransaction_->reconnectUntil) {
+        finish(russian("За 90 секунд не удалось подтвердить ключ после перезапуска"));
+        return;
+    }
     if (reconnectAt_ > 0 && now >= reconnectAt_) {
         if (wantsConnection_ && !closing_ && socket_->state() == QAbstractSocket::UnconnectedState)
             openLink(true);
@@ -1266,6 +1608,18 @@ void Client::tick() {
     }
     if (timeout_ > 0 && now >= timeout_) {
         traceConnection("TCP: timeout while waiting for stage", static_cast<int>(wait_));
+        if (wait_ == Wait::OwnTelemetry) {
+            wait_ = Wait::None;
+            timeout_ = 0;
+            advanceRadioReadings();
+            proceed();
+            emit changed();
+            return;
+        }
+        if (wait_ == Wait::RadioBackupReboot) {
+            finish(russian("Ожидание рации после перезапуска"), true);
+            return;
+        }
         finish(wait_ == Wait::None ? russian("Не удалось подключиться за 15 секунд")
                                   : russian("Рация не ответила вовремя"), true);
         return;
@@ -1277,7 +1631,7 @@ void Client::tick() {
 }
 
 bool Client::write(const meshcore::Bytes& body, Wait wait) {
-    const auto packet = meshcore::frame(body);
+    auto packet = meshcore::frame(body);
     if (packet.empty()) {
         pendingId_.clear();
         deferSocketFailure(russian("Не удалось сформировать команду"));
@@ -1285,11 +1639,265 @@ bool Client::write(const meshcore::Bytes& body, Wait wait) {
     }
     wait_ = wait;
     timeout_ = clock_.elapsed() + kReplyTimeout;
-    if (socket_->write(rawBytes(packet)) != static_cast<qint64>(packet.size())) {
+    auto bytes = rawBytes(packet);
+    const qint64 written = socket_->write(bytes);
+    if (body.front() == kImportPrivateKey) {
+        bytes.fill('\0');
+        std::fill(packet.begin(), packet.end(), 0);
+    }
+    if (written != static_cast<qint64>(packet.size())) {
         deferSocketFailure(russian("Команду не удалось записать в TCP-соединение"), true);
         return false;
     }
     return true;
+}
+
+bool Client::sameRadioBackupEndpoint() const {
+    return radioBackupTransaction_ && host_ == radioBackupTransaction_->host && port_ == radioBackupTransaction_->port;
+}
+
+void Client::completeRadioBackupKey(int result, const QByteArray& key, const QString& text) {
+    const int request = radioBackupKeyRequest_;
+    radioBackupKeyRequest_ = 0;
+    radioBackupKeyTarget_.clear();
+    if (request > 0)
+        emit radioBackupKeyResult(request, result, key, text);
+}
+
+void Client::completeRadioBackup(const QString& confirmedPublicKey, const QString& error) {
+    if (!radioBackupTransaction_)
+        return;
+    auto transaction = std::move(*radioBackupTransaction_);
+    radioBackupTransaction_.reset();
+    transaction.key.fill('\0');
+    QString result = transaction.failure;
+    for (const auto& problem : {error, transaction.skipped}) {
+        if (!problem.isEmpty()) {
+            if (!result.isEmpty())
+                result += russian(". ");
+            result += problem;
+        }
+    }
+    const bool success = result.isEmpty() && !confirmedPublicKey.isEmpty();
+    if (success) {
+        result = russian("Копия восстановлена на рации");
+    } else if (transaction.acknowledged > 0) {
+        result += russian(". Подтверждено команд: %1 из %2")
+            .arg(static_cast<int>(transaction.acknowledged)).arg(static_cast<int>(transaction.writes.size()));
+    }
+    status_ = result;
+    emit radioBackupRestored(transaction.id, success, confirmedPublicKey, result);
+}
+
+bool Client::advanceRadioBackup() {
+    if (radioBackupKeyRequest_) {
+        if (radioKey_ == radioBackupKeyTarget_) {
+            write({kExportPrivateKey}, Wait::RadioBackupKey);
+            return true;
+        }
+        completeRadioBackupKey(BackupKeyFailed, {}, russian("Подключена другая рация"));
+    }
+    if (!radioBackupTransaction_)
+        return false;
+    auto& transaction = *radioBackupTransaction_;
+    if (!sameRadioBackupEndpoint() || radioKey_ != transaction.target) {
+        completeRadioBackup({}, russian("Подключена другая рация"));
+        return false;
+    }
+    if (transaction.verifying)
+        return true;
+
+    const int total = static_cast<int>(transaction.writes.size());
+    const int done = static_cast<int>(transaction.acknowledged);
+    if (transaction.failure.isEmpty() && done < total) {
+        const auto& next = transaction.writes[done];
+        const auto code = next.front();
+        if (code == kImportPrivateKey) {
+            meshcore::Bytes command{kImportPrivateKey};
+            const auto* begin = reinterpret_cast<const std::uint8_t*>(transaction.key.constData());
+            command.insert(command.end(), begin, begin + transaction.key.size());
+            transaction.key.fill('\0');
+            write(command, Wait::RadioBackupWrite);
+            std::fill(command.begin(), command.end(), 0);
+        } else {
+            write(next, Wait::RadioBackupWrite);
+        }
+        emit radioBackupProgress(transaction.id, radioBackupStage(code), done, total);
+        return true;
+    }
+    if (transaction.keyAccepted) {
+        if (write({19, 'r', 'e', 'b', 'o', 'o', 't'}, Wait::RadioBackupReboot)) {
+            transaction.verifying = true;
+            transaction.reconnectUntil = clock_.elapsed() + kBackupReconnectWindow;
+        }
+        emit radioBackupProgress(transaction.id, russian("Перезапуск и проверка ключа"), done, total);
+        return true;
+    }
+    if (done == 0 && !transaction.failure.isEmpty()) {
+        completeRadioBackup({}, QString());
+        return false;
+    }
+    if (total == 0) {
+        completeRadioBackup(radioKey_);
+        return false;
+    }
+    transaction.verifying = true;
+    write(meshcore::deviceQuery(), Wait::Device);
+    emit radioBackupProgress(transaction.id, russian("Проверка рации"), done, total);
+    return true;
+}
+
+void Client::readRadioBackupReply(const meshcore::Bytes& frame) {
+    const auto code = frame.front();
+    const bool rejected = code == meshcore::response::Error || code == kCommandDisabled;
+    if (wait_ == Wait::RadioBackupKey) {
+        if (!rejected && code != kPrivateKeyReply)
+            return;
+        wait_ = Wait::None;
+        timeout_ = 0;
+        if (radioKey_ != radioBackupKeyTarget_) {
+            completeRadioBackupKey(BackupKeyFailed, {}, russian("Подключена другая рация"));
+        } else if (code == kCommandDisabled || (code == meshcore::response::Error && frame.size() == 2 && frame[1] == 1)) {
+            completeRadioBackupKey(BackupKeyUnavailable, {}, russian("Прошивка запрещает чтение закрытого ключа"));
+        } else if (code == kPrivateKeyReply && frame.size() == 1 + kPrivateKeyBytes) {
+            QByteArray key(reinterpret_cast<const char*>(frame.data() + 1), kPrivateKeyBytes);
+            if (radioKeyMatchesPublic(key, QByteArray::fromHex(radioKey_.toLatin1())))
+                completeRadioBackupKey(BackupKeyRead, key, QString());
+            else
+                completeRadioBackupKey(BackupKeyFailed, {}, russian("Ключ в ответе не соответствует рации"));
+            key.fill('\0');
+        } else {
+            completeRadioBackupKey(BackupKeyFailed, {}, russian("Рация не вернула закрытый ключ"));
+        }
+    } else if (wait_ == Wait::RadioBackupReboot) {
+        if (rejected) {
+            wait_ = Wait::None;
+            timeout_ = 0;
+            completeRadioBackup({}, russian("Рация отклонила перезапуск. Новый ключ не проверен"));
+        } else if (code == meshcore::response::Ok && frame.size() == 1) {
+            deferSocketFailure(russian("Рация перезапускается"), true);
+            return;
+        } else {
+            return;
+        }
+    } else {
+        if (!rejected && !(code == meshcore::response::Ok && frame.size() == 1))
+            return;
+        if (!radioBackupTransaction_)
+            return;
+        auto& transaction = *radioBackupTransaction_;
+        const auto command = transaction.writes[transaction.acknowledged].front();
+        wait_ = Wait::None;
+        timeout_ = 0;
+        if (rejected) {
+            transaction.failure = russian("Рация отклонила запись: %1").arg(radioBackupStage(command));
+            if (code == kCommandDisabled)
+                transaction.failure += russian(" (запрещено прошивкой)");
+            else if (frame.size() == 2 && frame[1] == 3)
+                transaction.failure += russian(" (память заполнена)");
+        } else {
+            ++transaction.acknowledged;
+            if (command == kImportPrivateKey)
+                transaction.keyAccepted = true;
+        }
+    }
+    proceed();
+    emit changed();
+}
+
+void Client::updateRadioIdentity(const meshcore::SelfInfo& device) {
+    radioName_ = fromWire(device.name);
+    radioNameBytes_ = device.name.size();
+    self_ = device;
+    parameters_ = russian("Частота: %1\nПолоса: %2\nМощность: %3 дБм (макс. %4 дБм)\nSF: %5 · CR: %6")
+        .arg(device.frequencyKhz == 0 ? russian("—") : decimalMilli(device.frequencyKhz) + russian(" МГц"))
+        .arg(device.bandwidthHz == 0 ? russian("—") : decimalMilli(device.bandwidthHz) + russian(" кГц"))
+        .arg(device.powerDbm).arg(device.maxPowerDbm)
+        .arg(device.spreadingFactor ? QString::number(device.spreadingFactor) : russian("—"))
+        .arg(device.codingRate >= 5 && device.codingRate <= 8
+             ? QLatin1String("4/") + QString::number(device.codingRate) : russian("—"));
+    QSettings settings;
+    settings.setValue(QLatin1String("radio/last"), radioKey_);
+    settings.setValue(QLatin1String("radio/lastName"), radioName_);
+}
+
+void Client::completeRadioSetting(bool success, const QString& text) {
+    if (!radioSettingsTransaction_)
+        return;
+    const int id = radioSettingsTransaction_->id;
+    refreshNeeded_ |= radioSettingsTransaction_->refreshContacts;
+    radioSettingsTransaction_.reset();
+    status_ = text;
+    emit radioSettingsResult(id, success, text);
+}
+
+void Client::readRadioSettingsReply(const meshcore::Bytes& frame) {
+    namespace response = meshcore::response;
+    if (!radioSettingsTransaction_)
+        return;
+    auto& transaction = *radioSettingsTransaction_;
+    const auto code = frame.front();
+    const bool rejected = code == response::Error || code == 0x0f;
+    if (wait_ == Wait::RadioSettingIdentity) {
+        const auto identity = meshcore::parseSelf(frame);
+        if (!identity && !rejected && code != response::SelfInfo)
+            return;
+        const bool confirmed = identity && identity->key == self_.key;
+        if (confirmed)
+            updateRadioIdentity(*identity);
+        const QString result = !transaction.error.isEmpty() ? transaction.error
+            : confirmed ? russian("Сохранено на рации")
+                        : russian("Рация приняла изменения, но не вернула настройки");
+        const bool success = transaction.error.isEmpty() && confirmed;
+        wait_ = Wait::None;
+        timeout_ = 0;
+        completeRadioSetting(success, result);
+    } else {
+        if (code != response::Ok && !rejected)
+            return;
+        if (code == response::Ok) {
+            const auto& command = transaction.commands[transaction.acknowledged++];
+            transaction.refreshContacts |= command.front() == 9 || command.front() == 15;
+            if (command.front() == 9) {
+                for (auto& contact : contacts_) {
+                    if (std::equal(contact.key.begin(), contact.key.end(), command.begin() + 1)) {
+                        contact.flags = command[34];
+                        break;
+                    }
+                }
+            } else if (command.front() == 11 && command.size() == 12) {
+                radioRepeatEnabled_ = command[11] != 0;
+            } else if (command.front() == 61) {
+                pathHashMode_ = command[2];
+            }
+        } else {
+            transaction.error = transaction.acknowledged == 0
+                ? russian("Рация отклонила изменение")
+                : russian("Рация приняла изменений: %1 из %2")
+                    .arg(static_cast<int>(transaction.acknowledged)).arg(static_cast<int>(transaction.commands.size()));
+        }
+        wait_ = Wait::None;
+        timeout_ = 0;
+    }
+    proceed();
+    emit changed();
+}
+
+void Client::advanceRadioReadings() {
+    ++radioReadingsStage_;
+    if (radioReadingsStage_ == 1 && radioProtocolVersion_ < 8)
+        radioReadingsStage_ = 3;
+    if (radioReadingsStage_ == 3 && radioProtocolVersion_ < 5)
+        radioReadingsStage_ = 4;
+    if (radioReadingsStage_ >= 4) {
+        radioReadingsStage_ = -1;
+        const bool hasReadings = nextRadioReadings_.batteryMillivolts || nextRadioReadings_.uptimeSeconds ||
+                                 nextRadioReadings_.noiseDbm || nextRadioReadings_.temperatureTenthsC;
+        if (hasReadings)
+            nextRadioReadings_.capturedAt = QDateTime::currentDateTime().toTime_t();
+        radioReadings_ = nextRadioReadings_;
+        status_ = hasReadings ? russian("Показания рации обновлены") : russian("Рация не вернула показания");
+    }
 }
 
 void Client::frameReceived(const meshcore::Bytes& frame) {
@@ -1297,6 +1905,20 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
     if (frame.empty())
         return;
     const auto code = frame.front();
+
+    if (wait_ == Wait::OwnTelemetry && code == kTelemetryReply && frame.size() >= 8 &&
+        std::equal(self_.key.begin(), self_.key.begin() + 6, frame.begin() + 2)) {
+        const auto values = parseNodeTelemetry(rawBytes(frame).mid(8));
+        nextRadioReadings_.temperatureTenthsC = values.temperatureTenthsC;
+        if (!nextRadioReadings_.batteryMillivolts && values.batteryMillivolts && *values.batteryMillivolts > 0)
+            nextRadioReadings_.batteryMillivolts = values.batteryMillivolts;
+        wait_ = Wait::None;
+        timeout_ = 0;
+        advanceRadioReadings();
+        proceed();
+        emit changed();
+        return;
+    }
 
     if (console_.accept(frame)) {
         if (wait_ == Wait::Sync && (code == response::ContactMessage || code == response::ContactMessageV3))
@@ -1355,8 +1977,12 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
         if (const auto count = parseChannelCount(frame)) {
             traceConnection("MeshCore: device query answered");
             channelCount_ = *count;
+            radioProtocolVersion_ = frame[1];
+            radioMaxContacts_ = frame[1] >= 3 && frame[2] != 0 ? frame[2] * 2 : -1;
+            radioRepeatEnabled_ = frame.size() > 80 ? std::optional<bool>(frame[80] != 0) : std::nullopt;
             // DeviceInfo appends the path hash mode after the repeat-enabled flag.
-            pathHashMode_ = frame.size() > 81 && frame[81] <= 3 ? frame[81] : 0;
+            radioPathHashModeKnown_ = frame.size() > 81 && frame[81] <= 3;
+            pathHashMode_ = radioPathHashModeKnown_ ? frame[81] : 0;
             firmware_ = fromWire(parseFirmware(frame)).trimmed();
             if (firmware_.isEmpty())
                 firmware_ = russian("протокол %1").arg(frame[1]);
@@ -1370,6 +1996,12 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
         if (const auto device = parseSelf(frame)) {
             traceConnection("MeshCore: radio identity received");
             const QString key = QString::fromLatin1(rawBytes(device->key).toHex().constData());
+            if (radioBackupTransaction_ && radioBackupTransaction_->verifying) {
+                const auto& transaction = *radioBackupTransaction_;
+                const auto& expected = transaction.keyAccepted ? transaction.source : transaction.target;
+                if (!sameRadioBackupEndpoint() || key != expected)
+                    completeRadioBackup({}, russian("Рация вернула другой ключ. Восстановление не подтверждено"));
+            }
             if (key != radioKey_) {
                 lastBatteryMillivolts_ = 0;
                 radioKey_ = key;
@@ -1377,19 +2009,7 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
                 channels_.clear();
                 loadHistory();
             }
-            radioName_ = fromWire(device->name);
-            radioNameBytes_ = device->name.size();
-            self_ = *device;
-            parameters_ = russian("Частота: %1\nПолоса: %2\nМощность: %3 дБм (макс. %4 дБм)\nSF: %5 · CR: %6")
-                .arg(device->frequencyKhz == 0 ? russian("—") : decimalMilli(device->frequencyKhz) + russian(" МГц"))
-                .arg(device->bandwidthHz == 0 ? russian("—") : decimalMilli(device->bandwidthHz) + russian(" кГц"))
-                .arg(device->powerDbm).arg(device->maxPowerDbm)
-                .arg(device->spreadingFactor ? QString::number(device->spreadingFactor) : russian("—"))
-                .arg(device->codingRate >= 5 && device->codingRate <= 8
-                     ? QLatin1String("4/") + QString::number(device->codingRate) : russian("—"));
-            QSettings settings;
-            settings.setValue(QString::fromLatin1("radio/last"), radioKey_);
-            settings.setValue(QString::fromLatin1("radio/lastName"), radioName_);
+            updateRadioIdentity(*device);
             traceConnection("MeshCore: request contacts");
             requestContacts();
         } else if (code == response::Error || code == response::SelfInfo) {
@@ -1403,10 +2023,13 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
         } else if (const auto contact = parseContact(frame)) {
             if (nextContacts_.size() < kContactLimit)
                 nextContacts_.push_back(*contact);
+            else
+                radioContactsOverflow_ = true;
             timeout_ = clock_.elapsed() + kReplyTimeout;
         } else if (code == response::ContactsEnd || code == response::Error) {
             if (!ready_)
                 traceConnection("MeshCore: contact list complete, size", static_cast<int>(nextContacts_.size()));
+            radioContactsComplete_ = code == response::ContactsEnd && !radioContactsOverflow_;
             if (code == response::ContactsEnd) {
                 contacts_.swap(nextContacts_);
                 for (const auto& contact : contacts_)
@@ -1415,6 +2038,7 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
             nextContacts_.clear();
             nextChannels_.clear();
             channelIndex_ = 0;
+            radioChannelsComplete_ = true;
             loadNextChannel();
         }
         break;
@@ -1426,6 +2050,8 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
                 nextChannels_.push_back(*channel);
         } else if (code != response::Error) {
             return;
+        } else if (frame.size() != 2 || frame[1] != 2) {
+            radioChannelsComplete_ = false;
         }
         ++channelIndex_;
         loadNextChannel();
@@ -1466,8 +2092,10 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
         } else if (wait_ == Wait::Battery && (code == response::Battery || code == response::Error || code == 0x0f)) {
             const auto reading = parseBattery(frame);
             batteryMillivolts_ = reading && reading->millivolts != 65535 ? static_cast<int>(reading->millivolts) : 0;
-            if (batteryMillivolts_ > 0)
+            if (batteryMillivolts_ > 0) {
                 lastBatteryMillivolts_ = batteryMillivolts_;
+                nextRadioReadings_.batteryMillivolts = batteryMillivolts_;
+            }
             battery_ = russian("Рация не вернула показания.");
             if (reading) {
                 battery_ = russian("Аккумулятор: %1").arg(reading->millivolts > 0 && reading->millivolts != 65535
@@ -1475,7 +2103,10 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
                 if (reading->totalKb)
                     battery_ += russian("\nПамять: %1 из %2 КБ").arg(reading->usedKb).arg(reading->totalKb);
             }
-            status_ = reading ? russian("Показания рации обновлены") : battery_;
+            if (radioReadingsStage_ == 0)
+                advanceRadioReadings();
+            else
+                status_ = reading ? russian("Показания рации обновлены") : battery_;
         } else {
             break;
         }
@@ -1499,6 +2130,57 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
             proceed();
         }
         break;
+    case Wait::RadioStats: {
+        const auto expected = static_cast<std::uint8_t>(radioReadingsStage_ - 1);
+        if (code == kStatsReply && frame.size() >= 2 && frame[1] == expected) {
+            const QByteArray bytes = rawBytes(frame);
+            if (expected == 0 && bytes.size() >= 11) {
+                const auto mv = littleEndian(bytes, 2, 2);
+                if (!nextRadioReadings_.batteryMillivolts && mv > 0 && mv != 65535)
+                    nextRadioReadings_.batteryMillivolts = static_cast<int>(mv);
+                nextRadioReadings_.uptimeSeconds = littleEndian(bytes, 4, 4);
+            } else if (expected == 1 && bytes.size() >= 14) {
+                nextRadioReadings_.noiseDbm = static_cast<qint16>(littleEndian(bytes, 2, 2));
+                nextRadioReadings_.transmitSeconds = littleEndian(bytes, 6, 4);
+                nextRadioReadings_.receiveSeconds = littleEndian(bytes, 10, 4);
+            }
+        } else if (code != response::Error && code != 0x0f) {
+            break;
+        }
+        advanceRadioReadings();
+        wait_ = Wait::None;
+        timeout_ = 0;
+        proceed();
+        emit changed();
+        break;
+    }
+    case Wait::OwnTelemetry:
+        if (code == response::Error || code == 0x0f) {
+            advanceRadioReadings();
+            wait_ = Wait::None;
+            timeout_ = 0;
+            proceed();
+            emit changed();
+        }
+        break;
+    case Wait::RadioSetting:
+    case Wait::RadioSettingIdentity:
+        readRadioSettingsReply(frame);
+        break;
+    case Wait::RadioBackupKey:
+    case Wait::RadioBackupWrite:
+    case Wait::RadioBackupReboot:
+        readRadioBackupReply(frame);
+        break;
+    case Wait::RestartRadio:
+        if (code == response::Error || code == 0x0f) {
+            status_ = russian("Рация отклонила команду перезапуска");
+            wait_ = Wait::None;
+            timeout_ = 0;
+            proceed();
+            emit changed();
+        }
+        break;
     case Wait::None:
         break;
     }
@@ -1506,6 +2188,7 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
 
 void Client::requestContacts() {
     nextContacts_.clear();
+    radioContactsOverflow_ = false;
     status_ = russian("Читаю контакты и каналы…");
     if (write(meshcore::getContacts(), Wait::Contacts))
         emit changed();
@@ -1580,6 +2263,11 @@ void Client::loadNextChannel() {
     }
     if (channelChangeReload_)
         finishChannelChange(true, russian("Канал сохранён на рации"));
+    if (radioBackupTransaction_ && radioBackupTransaction_->verifying) {
+        const QString issue = radioContactsComplete_ && radioChannelsComplete_ ? QString()
+            : russian("Не удалось перечитать контакты или каналы рации");
+        completeRadioBackup(radioKey_, issue);
+    }
     if (ready_ && !busy())
         syncQueue();
 }
@@ -1630,6 +2318,24 @@ void Client::syncQueue() {
 void Client::proceed() {
     if (!ready_ || busy() || closing_ || !pendingSocketFailure_.isEmpty())
         return;
+    if (advanceRadioBackup())
+        return;
+    if (radioSettingsTransaction_) {
+        const auto& transaction = *radioSettingsTransaction_;
+        const bool accepted = transaction.error.isEmpty();
+        if (accepted && transaction.acknowledged < transaction.commands.size()) {
+            write(transaction.commands[transaction.acknowledged], Wait::RadioSetting);
+            return;
+        }
+        if (transaction.readBackIdentity && transaction.acknowledged > 0) {
+            write(meshcore::appStart(), Wait::RadioSettingIdentity);
+            return;
+        }
+        const QString text = accepted ? russian("Сохранено на рации") : transaction.error;
+        completeRadioSetting(accepted, text);
+        if (busy() || !ready_ || closing_)
+            return;
+    }
     if (syncNeeded_) {
         syncQueue();
     } else if (consoleRequest_ && console_.canStart(consoleRequest_->operation)) {
@@ -1642,9 +2348,14 @@ void Client::proceed() {
     } else if (advertNeeded_) {
         advertNeeded_ = false;
         write(meshcore::advertise(), Wait::Advert);
-    } else if (batteryNeeded_) {
+    } else if (radioReadingsStage_ == 0 || batteryNeeded_) {
         batteryNeeded_ = false;
         write(meshcore::getBattery(), Wait::Battery);
+    } else if (radioReadingsStage_ == 1 || radioReadingsStage_ == 2) {
+        write({56, static_cast<std::uint8_t>(radioReadingsStage_ - 1)}, Wait::RadioStats);
+    } else if (radioReadingsStage_ == 3) {
+        if (write({39, 0, 0, 0}, Wait::OwnTelemetry))
+            timeout_ = clock_.elapsed() + 2500;
     } else if (reactionRequest_) {
         startReaction();
     } else if (retryExpired() || sendNext()) {
@@ -1858,6 +2569,23 @@ bool Client::showEcho(const ChannelWatch& watch) {
 }
 
 void Client::onRadioLog(const meshcore::Bytes& frame) {
+    if (frame.size() > 3 && receivers(SIGNAL(radioPacketReceived(int,int,int,int,int,int))) > 0) {
+        const int route = frame[3] & 3;
+        const std::size_t descriptor = route == 0 || route == 3 ? 8 : 4;
+        int type = -1;
+        int hops = -1;
+        if (descriptor < frame.size()) {
+            const int count = frame[descriptor] & 63;
+            const int hashWidth = (frame[descriptor] >> 6) + 1;
+            const auto pathBytes = static_cast<std::size_t>(count * hashWidth);
+            if (pathBytes <= 64 && descriptor + 1 + pathBytes < frame.size()) {
+                type = (frame[3] >> 2) & 15;
+                hops = count;
+            }
+        }
+        emit radioPacketReceived(static_cast<qint8>(frame[1]), static_cast<qint8>(frame[2]),
+                                 type, hops, static_cast<int>(frame.size() - 3), type >= 0 ? route : -1);
+    }
     if (frame.size() > 3 && ((frame[3] >> 2) & 15) == 5)
         ++groupHeard_;
     auto packet = meshcore::parseGroupEcho(frame);
@@ -2060,9 +2788,7 @@ void Client::onSendResult(const meshcore::Bytes& frame) {
     } else {
         pendingMessage_.delivery = waitingForAck();
         const auto deadline = clock_.elapsed() + ackWait(frame);
-        addMessage(pendingId_, pendingMessage_, *tag, deadline);
-        history_.last().recipient = pendingKey_;
-        history_.last().flood = frame[1] != 0;
+        addMessage(pendingId_, pendingMessage_, *tag, deadline, frame[1] != 0);
     }
     pendingId_.clear();
     pendingRetry_ = false;
@@ -2105,12 +2831,30 @@ void Client::finish(const QString& status, bool retryable) {
     }
     console_.close();
     finishChannelChange(false, russian("Соединение закрыто, результат изменения канала неизвестен"));
+    completeRadioSetting(false, russian("Соединение закрыто, результат изменений неизвестен"));
+    completeRadioBackupKey(BackupKeyFailed, {}, status);
+    const bool verifyingBackupAfterReboot = retryable && wantsConnection_ && sameRadioBackupEndpoint() &&
+        radioBackupTransaction_->reconnectUntil > clock_.elapsed();
+    if (radioBackupTransaction_ && !verifyingBackupAfterReboot) {
+        QString error = status;
+        const auto& transaction = *radioBackupTransaction_;
+        if (wait_ == Wait::RadioBackupWrite && transaction.acknowledged < transaction.writes.size()) {
+            error += russian(". Результат записи неизвестен: %1")
+                .arg(radioBackupStage(transaction.writes[transaction.acknowledged].front()));
+        }
+        if (transaction.keyAccepted && transaction.reconnectUntil == 0) {
+            error += russian(". Рация приняла ключ. Подтвердить его после перезапуска не удалось");
+        }
+        completeRadioBackup({}, error);
+    }
 
-    const bool shouldReconnect = retryable && autoReconnect_ && wantsConnection_;
+    const bool shouldReconnect = verifyingBackupAfterReboot || (retryable && autoReconnect_ && wantsConnection_);
     if (!shouldReconnect)
         invalidatePending();
     earlyAcks_.clear();
     ready_ = false;
+    radioContactsComplete_ = false;
+    radioChannelsComplete_ = false;
     wait_ = Wait::None;
     timeout_ = 0;
     syncNeeded_ = false;
@@ -2119,6 +2863,9 @@ void Client::finish(const QString& status, bool retryable) {
     manualSync_ = false;
     advertNeeded_ = false;
     batteryNeeded_ = false;
+    radioReadingsStage_ = -1;
+    radioReadings_ = {};
+    nextRadioReadings_ = {};
     heard_.clear();
     echoWatches_.clear();
     deferredIncoming_.clear();
@@ -2161,17 +2908,27 @@ void Client::finish(const QString& status, bool retryable) {
 }
 
 void Client::addMessage(const QString& target, const ChatMessage& message,
-                        quint32 tag, qint64 deadline) {
+                        quint32 tag, qint64 deadline, bool flood) {
     StoredMessage row{target, message};
     row.deadline = deadline;
-    if (tag != 0)
+    if (tag != 0) {
         row.ackTags.append(tag);
+        row.recipient = pendingKey_;
+        row.flood = flood;
+    }
     const auto utf8 = message.text.toUtf8();
     row.reactionHash = meshcore::reactionHash({utf8.constData(), static_cast<std::size_t>(utf8.size())}, message.timestamp);
     adoptReactions(row);
-    history_.append(row);
-    if (history_.size() > kHistoryLimit)
-        history_.remove(0, history_.size() - kHistoryLimit);
+    const bool pendingSend = message.outgoing && !pendingRetry_ && target == pendingId_;
+    if (pendingSend)
+        history_.insert(qMin(pendingHistoryPosition_, history_.size()), row);
+    else
+        history_.append(row);
+    const int overflow = history_.size() - kHistoryLimit;
+    if (overflow > 0) {
+        history_.remove(0, overflow);
+        pendingHistoryPosition_ = qMax(0, pendingHistoryPosition_ - overflow);
+    }
     refreshUnread();
     saveHistory();
 }
@@ -2282,6 +3039,114 @@ void Client::loadHistory() {
     refreshUnread();
     targetNames_.swap(names);
     lastOutgoingTimestamp_ = lastOutgoingTimestamp;
+}
+
+QString Client::localHistoryRadioKey() const {
+    return !history_.isEmpty() && radioKey_.size() == 64 ? radioKey_ : QString();
+}
+
+bool Client::canLoadRadioBackupHistory(const QString& key) const {
+    return !closing_ && pendingSocketFailure_.isEmpty() && !connecting() && !reconnecting() &&
+           key == radioKey_ && validRadioBackupKey(key) && !radioBackupTransaction_ &&
+           pendingId_.isEmpty() && outgoing_.empty() &&
+           std::none_of(history_.constBegin(), history_.constEnd(), [](const StoredMessage& message) {
+               return message.deadline > 0 || message.retryAt > 0 || !message.ackTags.isEmpty();
+           });
+}
+
+bool Client::reloadRadioBackupHistory(const QString& key) {
+    if (!canLoadRadioBackupHistory(key))
+        return false;
+    loadHistory();
+    for (const auto& contact : contacts_)
+        targetNames_.insert(directId(meshcore::prefix(contact.key)), fromWire(contact.name));
+    QSet<QString> activeChannels;
+    QMap<QString, QString> channelsByHash;
+    for (const auto& channel : channels_) {
+        const QString id = channelId(channel);
+        targetNames_.insert(id, channel.name.empty()
+            ? russian("Канал %1").arg(channel.index + 1) : fromWire(channel.name));
+        if (!ready_)
+            continue;
+        activeChannels.insert(id);
+        const auto* canonical = channelForIndex(channel.index);
+        const QString hash = id.mid(id.lastIndexOf(QLatin1Char('/')) + 1);
+        const QString target = canonical ? channelId(*canonical) : id;
+        const auto previous = channelsByHash.constFind(hash);
+        if (previous == channelsByHash.constEnd())
+            channelsByHash.insert(hash, target);
+        else if (previous.value() != target)
+            channelsByHash[hash].clear();
+    }
+    bool remapped = false;
+    for (auto& record : history_) {
+        if (!record.target.startsWith(QLatin1String("c/")) || activeChannels.contains(record.target))
+            continue;
+        const QString hash = record.target.mid(record.target.lastIndexOf(QLatin1Char('/')) + 1);
+        const QString target = channelsByHash.value(hash);
+        if (!target.isEmpty()) {
+            record.target = target;
+            remapped = true;
+        }
+    }
+    if (remapped) {
+        refreshUnread();
+        saveHistory();
+    }
+    emit changed();
+    return true;
+}
+
+bool Client::canEraseLocalHistory() const {
+    return !closing_ && pendingId_.isEmpty() && outgoing_.empty() && !localHistoryRadioKey().isEmpty();
+}
+
+void Client::reloadStoredHistory() {
+    if (connected() || connecting() || reconnecting())
+        return;
+    QSettings settings;
+    settings.setFallbacksEnabled(false);
+    const QString restoredKey = settings.value(QLatin1String("radio/last")).toString();
+    if (restoredKey != radioKey_) {
+        radioKey_ = restoredKey;
+        self_ = {};
+        contacts_.clear();
+        channels_.clear();
+        channelAliases_.fill(-1);
+        firmware_.clear();
+        parameters_.clear();
+        battery_.clear();
+        batteryMillivolts_ = lastBatteryMillivolts_ = 0;
+        channelCount_ = 0;
+        publicStatus_.clear();
+        queueStatus_.clear();
+        directReceived_ = channelReceived_ = publicReceived_ = dataReceived_ = groupHeard_ = 0;
+    }
+    radioName_ = settings.value(QLatin1String("radio/lastName")).toString();
+    blocks_.clear();
+    const QVariantMap blocked = settings.value(QLatin1String("ui/blockedSenders")).toMap();
+    for (auto it = blocked.constBegin(); it != blocked.constEnd(); ++it)
+        blocks_.insert(it.key(), it.value().toString());
+    loadHistory();
+    emit changed();
+}
+
+bool Client::eraseLocalHistory(const QString& expectedRadioKey) {
+    if (!canEraseLocalHistory() || radioKey_ != expectedRadioKey)
+        return false;
+    QSettings settings;
+    settings.remove(QString::fromLatin1("radios/%1/history").arg(radioKey_));
+    settings.sync();
+    if (settings.status() != QSettings::NoError)
+        return false;
+    history_.clear();
+    unread_.clear();
+    pendingHistoryPosition_ = 0;
+    earlyAcks_.clear();
+    deferredReactions_.clear();
+    echoWatches_.clear();
+    emit changed();
+    return true;
 }
 
 void Client::saveHistory() {

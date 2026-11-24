@@ -7,7 +7,6 @@
 #include <QtGui/QWidget>
 
 class QButtonGroup;
-class QCheckBox;
 class QComboBox;
 class QLabel;
 class QPushButton;
@@ -63,7 +62,7 @@ private:
     QButtonGroup* displays_;
     QButtonGroup* orders_;
     QComboBox* silence_;
-    QCheckBox* favoritesFirst_;
+    QPushButton* favoritesFirst_;
     QLabel* count_;
     QPushButton* refresh_;
     QPushButton* reset_;

@@ -4,6 +4,7 @@
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QPointer>
 #include <QtCore/QSettings>
+#include <QtCore/QTimer>
 #include <QtGui/QDialog>
 #include <QtGui/QWidget>
 
@@ -37,6 +38,7 @@ public slots:
 
 signals:
     void detailRequested(QWidget* page, const QString& title);
+    void detailCloseRequested(QWidget* page);
     void mapSettingsRequested();
     void appearanceChanged(int theme, int chatTextSize);
     void connectionSettingsRequested();
@@ -47,6 +49,7 @@ private slots:
     void setVibration(bool enabled);
     void onIncomingMessage(const QString& target, const QString& text, bool room);
     void testVibration();
+    void retryTestVibration();
     void refreshMessages();
     void refreshInventory();
     void showIdentity();
@@ -56,7 +59,14 @@ private slots:
     void showContacts();
     void showLocation();
     void showAdvanced();
+    void showAttachments();
+    void showBackup();
+    void showAir();
+    void showMaintenance();
+    void setRadioClock();
+    void clockResult(int request, bool success, const QString& status);
     void showNotifications();
+    void chooseNotificationSound();
     void showLog();
     void showAbout();
     void showMessagePreferences();
@@ -69,15 +79,22 @@ private slots:
     void updateAppearanceSummary(int theme, int chatTextSize);
     void setUserPreference(bool enabled);
     void refreshBatteryReadout();
+    void updatePrivacyControls();
+    void applyPrivacySettings();
+    void showTrustedContacts();
+    void updateTrustedContactSelection();
+    void setSelectedTrustedContact();
+    void finishPrivacySettings(int requestId, bool success, const QString& status);
     void openConsole();
     void toggleDemo();
 
 private:
-    enum class Readout { Info, Identity, Parameters, Battery, Contacts, Location };
-    void displayReadout(Readout readout, const QString& title);
     void saveToggle(const char* key, bool enabled, QLabel* feedback = nullptr);
+    void showVibrationResult(QLabel* feedback, int result);
     void updateSendTriesControls(QWidget* controls);
     void openChannels(bool adding);
+    void updateBatteryPage();
+    void refreshTrustedContacts();
 
     Client& client_;
     NativeVibration* vibration_;
@@ -91,14 +108,38 @@ private:
     QPushButton* connectionRow_ = nullptr;
     QPushButton* notificationsRow_ = nullptr;
     QPushButton* messagesRow_ = nullptr;
+    QPushButton* attachmentsRow_ = nullptr;
     QPushButton* appearanceRow_ = nullptr;
     QPointer<QPushButton> mapsRow_;
     QPointer<QPushButton> refreshRow_;
+    QPointer<QPushButton> clockRow_;
+    QPointer<QLabel> clockFeedback_;
+    int clockRequest_ = 0;
     QPointer<QLabel> notificationFeedback_;
+    QPointer<QPushButton> notificationSoundRow_;
+    QPointer<QLabel> vibrationRetryFeedback_;
     QPointer<QLabel> connectionFeedback_;
     QPointer<QLabel> liveReadout_;
-    Readout reading_ = Readout::Info;
+    QPointer<QWidget> batteryPage_;
+    QPointer<QLabel> batteryState_;
+    QPointer<QPushButton> batteryRefresh_;
+    QPointer<QPushButton> batteryPrivacy_;
+    QPointer<QLineEdit> privacyLatitude_;
+    QPointer<QLineEdit> privacyLongitude_;
+    QPointer<QPushButton> privacyShare_;
+    QPointer<QComboBox> privacyBase_;
+    QPointer<QComboBox> privacySensors_;
+    QPointer<QPushButton> privacySave_;
+    QPointer<QPushButton> privacyTrusted_;
+    QPointer<QLabel> privacyFeedback_;
+    QPointer<QComboBox> trustedContacts_;
+    QPointer<QPushButton> trustedChange_;
+    QPointer<QLabel> trustedFeedback_;
+    QString privacyRadioKey_;
+    int privacyRequest_ = 0;
+    int trustRequest_ = 0;
     QElapsedTimer lastNotification_;
+    QTimer vibrationRetryTimer_;
     bool vibrateOnMessage_ = false;
 };
 
@@ -115,10 +156,12 @@ private slots:
     void selectTheme(int theme);
     void setChatSize(int pixels);
     void syncPreferences();
+    void chooseChatBackground();
 
 private:
     QSettings settings_;
     QLabel* sizeValue_ = nullptr;
+    QPushButton* backgroundRow_ = nullptr;
     ChatAppearancePreview* preview_ = nullptr;
     int theme_ = 0;
     int chatTextSize_ = 0;

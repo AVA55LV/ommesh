@@ -1,6 +1,7 @@
 #include "client.hpp"
 
 #include <QtCore/QCoreApplication>
+#include <QtCore/QDataStream>
 #include <QtCore/QSettings>
 #include <QtCore/QStringList>
 #include <QtCore/QTemporaryDir>
@@ -472,6 +473,48 @@ void testBlockedSenders() {
           "unblocking restores visibility without reviving unread markers");
 }
 
+void testReloadDifferentRadioHistory() {
+    Client client;
+    SimulatedRadio radio;
+    radio.connect(client);
+    radio.initialize(true, 0x41);
+    radio.reply({10});
+    waitUntil([&] { return client.connected() && !client.busy(); }, "source radio is ready before offline restore");
+    check(!client.nodes().isEmpty(), "source radio has network inventory");
+
+    const QString importedKey(64, QLatin1Char('b'));
+    const QString importedChat = QLatin1String("d/123456789abc");
+    const QString importedName = QString::fromUtf8("Нода из копии");
+    const QString importedMessage = QString::fromUtf8("Сообщение из копии");
+    const QString signer = QLatin1String("1234abcd");
+    QByteArray history;
+    QDataStream stream(&history, QIODevice::WriteOnly);
+    stream.setVersion(QDataStream::Qt_4_6);
+    stream << quint32(4) << quint32(1) << importedChat << QString::fromUtf8("Комната")
+           << QString::fromUtf8("Автор") << importedMessage << quint32(10) << false << QString()
+           << true << qint32(-1) << qint32(-1) << QString() << false << quint16(0) << signer;
+    QSettings settings;
+    settings.setValue(QLatin1String("radio/last"), importedKey);
+    settings.setValue(QLatin1String("radio/lastName"), importedName);
+    settings.setValue(QString::fromLatin1("radios/%1/history").arg(importedKey), history);
+    QVariantMap blocked;
+    blocked.insert(QLatin1String("k:") + signer, QString::fromUtf8("Автор"));
+    settings.setValue(QLatin1String("ui/blockedSenders"), blocked);
+    settings.sync();
+
+    client.reloadStoredHistory();
+    check(client.radioName() != importedName, "do not change the identity of an active connection");
+    client.disconnectFromRadio();
+    client.reloadStoredHistory();
+    check(client.radioName() == importedName && client.localHistoryRadioKey() == importedKey,
+          "select the radio identified by the imported copy immediately");
+    check(client.nodes().isEmpty(), "do not associate prior radio contacts with the imported history");
+    const auto messages = client.messages(importedChat);
+    check(messages.size() == 1 && messages.first().text == importedMessage &&
+          messages.first().blocked && !messages.first().unread,
+          "hydrate the transferred chat and its imported block rule without a restart");
+}
+
 }  // namespace
 
 int main(int argc, char** argv) {
@@ -548,28 +591,42 @@ int main(int argc, char** argv) {
         check(pendingChannel.size() == 1 && pendingChannel.last().outgoing && !pendingChannel.last().canReact &&
               pendingChannel.last().delivery == QString::fromUtf8("Отправка…") &&
               pendingChannel.last().timestamp == sendTimestamp(group), "show one preview while radio reply is pending");
+        const std::string quotedReply = "@[Node] >hello everyone\nReply";
+        meshcore::Bytes earlyReply{8, 0, 0, 0, 5, 0, 0, 0, 'P', ':', ' '};
+        earlyReply.insert(earlyReply.end(), quotedReply.begin(), quotedReply.end());
+        radio.reply(earlyReply);
+        waitUntil([&] { return client.messages(channel).size() == 2; }, "receive reply before radio acknowledges the original");
+        const auto pendingWithReply = client.messages(channel);
+        check(pendingWithReply.first().outgoing && pendingWithReply.last().timestamp == 5 &&
+              pendingWithReply.last().text == QLatin1String(quotedReply.c_str()),
+              "reply below pending original even with an older sender timestamp");
         radio.reply({0});
         waitUntil([&] { return !client.busy(); }, "channel send finishes");
-        check(client.messages(channel).size() == 1, "replace pending preview with confirmed row");
-        check(client.messages(channel).last().delivery == QString::fromUtf8("Принято рацией"),
+        const auto acceptedWithReply = client.messages(channel);
+        check(acceptedWithReply.size() == 2 && acceptedWithReply.first().outgoing,
+              "replace pending preview in its existing position");
+        check(acceptedWithReply.first().delivery == QString::fromUtf8("Принято рацией"),
               "channel send reports acceptance only");
-        check(client.messages(channel).last().relayCount == -1, "no echoed channel copy, relay count unavailable");
+        check(acceptedWithReply.first().relayCount == -1, "no echoed channel copy, relay count unavailable");
 
         radio.reply({0x83});
         check(radio.command() == meshcore::Bytes({10}), "message waiting triggers sync");
-        radio.reply({8, 0, 0, 0, 6, 0, 0, 0, 'P', ':', ' ', 'O', 'K'});
+        radio.reply({8, 0, 0, 0, 4, 0, 0, 0, 'P', ':', ' ', 'O', 'K'});
         check(radio.command() == meshcore::Bytes({10}), "receive legacy channel");
         radio.reply({10});
         waitUntil([&] { return !client.busy(); }, "channel sync finishes");
-        check(client.messages(channel).at(0).text == QString::fromLatin1("OK") &&
-              client.messages(channel).at(0).author == QString::fromLatin1("P"), "channel author and text");
+        check(client.messages(channel).last().text == QLatin1String("OK") &&
+              client.messages(channel).last().author == QLatin1String("P") &&
+              client.latestMessages().value(channel).text == QLatin1String("OK"),
+              "channel history and preview use arrival order, keeping the wire timestamp intact");
         radio.close();
         waitUntil([&] { return !client.connected(); }, "handle peer closing");
         check(client.messages(direct).size() == 2, "offline history");
     }
 
     Client reopened;
-    check(reopened.messages(direct).size() == 2 && reopened.messages(channel).size() == 2,
+    check(reopened.messages(direct).size() == 2 && reopened.messages(channel).size() == 3 &&
+          reopened.messages(channel).first().outgoing && reopened.messages(channel).last().timestamp == 4,
           "persist history through restart");
     check(reopened.targets().at(0).unread == 0, "read status persists");
     SimulatedRadio secondRadio;
@@ -588,6 +645,7 @@ int main(int argc, char** argv) {
     testInitialConnectionFailures();
     testConfiguredSendTries();
     testBlockedSenders();
+    testReloadDifferentRadioHistory();
 
     std::cout << "TCP chat workflow passed\n";
 }

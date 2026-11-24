@@ -7,11 +7,19 @@
 #include "native_echo.hpp"
 #include "native_vibration.hpp"
 #include "node_map.hpp"
+#include "settings_attachments.hpp"
+#include "settings_backup.hpp"
 #include "settings_icons.hpp"
+#include "settings_radio_backup.hpp"
+#include "settings_radio_editor.hpp"
+#include "settings_radio_tools.hpp"
 #include "window.hpp"
 
+#include <QtCore/QDateTime>
 #include <QtCore/QFile>
+#include <QtCore/QDateTime>
 #include <QtCore/QSettings>
+#include <QtCore/QTimer>
 #include <QtCore/QVariant>
 #include <QtGui/QApplication>
 #include <QtGui/QButtonGroup>
@@ -31,6 +39,7 @@
 #include <QtGui/QVBoxLayout>
 
 #include <algorithm>
+#include <cmath>
 
 namespace {
 
@@ -400,6 +409,11 @@ AppearancePanel::AppearancePanel(QWidget* parent) : QWidget(parent) {
     preview_->setPreview(saved.theme, chatTextSize_);
     layout->addWidget(preview_);
 
+    auto* background = settingsGroup(layout, this, QString());
+    backgroundRow_ = addSettingsRow(background, "Фон чата", "defaultChatBackground", SettingGlyph::Appearance);
+    setRowValue(backgroundRow_, NodeChatOptions::defaultLabel(NodeChatOptions::Background));
+    connect(backgroundRow_, SIGNAL(clicked()), this, SLOT(chooseChatBackground()), Qt::QueuedConnection);
+
     addText(layout, ui("Темы"), this)->setObjectName(QLatin1String("settingsSectionTitle"));
     auto* content = new QWidget(this);
     content->setObjectName(QLatin1String("appearanceSwatches"));
@@ -453,8 +467,15 @@ void AppearancePanel::syncPreferences() {
     settings_.sync();
 }
 
+void AppearancePanel::chooseChatBackground() {
+    if (NodeChatOptions::chooseDefault(NodeChatOptions::Background, this))
+        setRowValue(backgroundRow_, NodeChatOptions::defaultLabel(NodeChatOptions::Background));
+}
+
 RadioSettingsPanel::RadioSettingsPanel(Client& client, QWidget* parent)
     : QWidget(parent), client_(client), vibration_(new NativeVibration) {
+    vibrationRetryTimer_.setSingleShot(true);
+    connect(&vibrationRetryTimer_, SIGNAL(timeout()), this, SLOT(retryTestVibration()));
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(14);
@@ -481,12 +502,10 @@ RadioSettingsPanel::RadioSettingsPanel(Client& client, QWidget* parent)
     messagesRow_ = addSettingsRow(app, "Сообщения и маршруты", "messagePreferences", SettingGlyph::Messages);
     messagesRow_->setProperty("settingKeywords",
         ui("непрочитанные заблокированные буквы кириллица превью ссылки повторы попытки отправка"));
-    auto* attachments = addSettingsRow(app, "Вложения", "attachmentsSettings", SettingGlyph::Attachments, false);
-    setRowValue(attachments, ui("Недоступно"));
-    attachments->setEnabled(false);
-    auto* backup = addSettingsRow(app, "Копия и перенос", "backupSettings", SettingGlyph::Backup, false);
-    setRowValue(backup, ui("Недоступно"));
-    backup->setEnabled(false);
+    attachmentsRow_ = addSettingsRow(app, "Вложения", "attachmentsSettings", SettingGlyph::Attachments);
+    connect(attachmentsRow_, SIGNAL(clicked()), this, SLOT(showAttachments()), Qt::QueuedConnection);
+    auto* backup = addSettingsRow(app, "Копия и перенос", "backupSettings", SettingGlyph::Backup);
+    connect(backup, SIGNAL(clicked()), this, SLOT(showBackup()), Qt::QueuedConnection);
     appearanceRow_ = addSettingsRow(app, "Оформление", "appearanceSettings", SettingGlyph::Appearance);
     appearanceRow_->setProperty("settingKeywords", ui("темы тема цвет размер текста шрифт"));
     connectionRow_ = addSettingsRow(app, "Подключение", "connectionSettings", SettingGlyph::Connection);
@@ -497,14 +516,14 @@ RadioSettingsPanel::RadioSettingsPanel(Client& client, QWidget* parent)
     connect(connectionRow_, SIGNAL(clicked()), this, SIGNAL(connectionSettingsRequested()));
 
     auto* tools = settingsGroup(layout, this, QString());
-    auto* air = addSettingsRow(tools, "В эфире", "airSettings", SettingGlyph::Air, false);
-    setRowValue(air, ui("Недоступно"));
-    air->setEnabled(false);
+    auto* air = addSettingsRow(tools, "В эфире", "airSettings", SettingGlyph::Air);
+    setRowValue(air, ui("Слушать"));
+    connect(air, SIGNAL(clicked()), this, SLOT(showAir()), Qt::QueuedConnection);
     auto* journal = addSettingsRow(tools, "Журнал", "radioLog", SettingGlyph::Log);
     connect(journal, SIGNAL(clicked()), this, SLOT(showLog()), Qt::QueuedConnection);
     auto* maintenance = addSettingsRow(tools, "Перезагрузка, сброс, стирание", "maintenanceSettings",
-                                      SettingGlyph::Power, false);
-    maintenance->setEnabled(false);
+                                      SettingGlyph::Power);
+    connect(maintenance, SIGNAL(clicked()), this, SLOT(showMaintenance()), Qt::QueuedConnection);
     auto* about = addSettingsRow(tools, "О приложении", "aboutSettings", SettingGlyph::About);
     setRowValue(about, QApplication::applicationVersion());
     connect(about, SIGNAL(clicked()), this, SLOT(showAbout()), Qt::QueuedConnection);
@@ -514,6 +533,10 @@ RadioSettingsPanel::RadioSettingsPanel(Client& client, QWidget* parent)
     client_.setWlanRecovery(preferences.value(QLatin1String("ui/wlanRecovery"), false).toBool());
     vibrateOnMessage_ = preferences.value(QLatin1String("ui/vibration"), false).toBool();
     connect(&client_, SIGNAL(changed()), this, SLOT(updateStatus()), Qt::QueuedConnection);
+    connect(&client_, SIGNAL(radioSettingsResult(int,bool,QString)),
+            this, SLOT(finishPrivacySettings(int,bool,QString)), Qt::QueuedConnection);
+    connect(&client_, SIGNAL(radioSettingsResult(int,bool,QString)),
+            this, SLOT(clockResult(int,bool,QString)), Qt::QueuedConnection);
     connect(&client_, SIGNAL(incomingChatMessage(QString,QString,bool)),
             this, SLOT(onIncomingMessage(QString,QString,bool)), Qt::QueuedConnection);
     updateStatus();
@@ -605,15 +628,49 @@ void RadioSettingsPanel::onIncomingMessage(const QString& target, const QString&
 }
 
 void RadioSettingsPanel::testVibration() {
-    if (!notificationFeedback_)
+    if (!notificationFeedback_ || vibrationRetryTimer_.isActive())
         return;
     client_.traceConnection("UI: test vibration");
     lastNotification_.start();
     const int result = vibration_->pulse();
     client_.traceConnection("UI: vibration result", result);
-    notificationFeedback_->setText(result == 0 ? ui("Телефон принял запрос на вибрацию.")
-        : ui("Телефон не принял запрос (%1). Проверьте вибросигналы в активном режиме.").arg(result));
+    if (result != NativeVibration::SystemLocked) {
+        showVibrationResult(notificationFeedback_.data(), result);
+        return;
+    }
+    vibrationRetryFeedback_ = notificationFeedback_;
+    notificationFeedback_->setText(ui("Телефон временно заблокировал вибрацию. Повторяю проверку…"));
     notificationFeedback_->show();
+    vibrationRetryTimer_.start(1400);
+}
+
+void RadioSettingsPanel::retryTestVibration() {
+    const QPointer<QLabel> feedback = vibrationRetryFeedback_;
+    vibrationRetryFeedback_ = nullptr;
+    if (!feedback || feedback.data() != notificationFeedback_.data() || !feedback->isVisible())
+        return;
+    if (!QApplication::activeWindow()) {
+        showVibrationResult(feedback.data(), NativeVibration::SystemLocked);
+        return;
+    }
+    lastNotification_.start();
+    const int result = vibration_->pulse();
+    client_.traceConnection("UI: vibration retry result", result);
+    showVibrationResult(feedback.data(), result);
+}
+
+void RadioSettingsPanel::showVibrationResult(QLabel* feedback, int result) {
+    QString text;
+    if (result == 0)
+        text = ui("Телефон принял запрос на вибрацию.");
+    else if (result == NativeVibration::SystemLocked)
+        text = ui("Телефон блокирует вибрацию (−22). Попробуйте ещё раз чуть позже, без подключённых аксессуаров или зарядки.");
+    else if (result == NativeVibration::ProfileDisabled)
+        text = ui("Включите вибросигнал в активном профиле телефона (−21).");
+    else
+        text = ui("Телефон не принял запрос на вибрацию (%1).").arg(result);
+    feedback->setText(text);
+    feedback->show();
 }
 
 void RadioSettingsPanel::refreshMessages() {
@@ -628,19 +685,396 @@ void RadioSettingsPanel::refreshInventory() {
         client_.refresh();
 }
 
-void RadioSettingsPanel::showInfo() { displayReadout(Readout::Info, ui("Сведения о ноде")); }
-void RadioSettingsPanel::showIdentity() { displayReadout(Readout::Identity, ui("Имя ноды")); }
-void RadioSettingsPanel::showParameters() { displayReadout(Readout::Parameters, ui("Частота и мощность")); }
-void RadioSettingsPanel::showContacts() { displayReadout(Readout::Contacts, ui("Контакты")); }
-void RadioSettingsPanel::showLocation() { displayReadout(Readout::Location, ui("Приватность")); }
+void RadioSettingsPanel::showInfo() {
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    liveReadout_ = addText(layout, client_.radioInfo(), page);
+    liveReadout_->setObjectName(QLatin1String("radioReadout"));
+    layout->addStretch(1);
+    emit detailRequested(settingsScroll(this, page), ui("Сведения о ноде"));
+}
+void RadioSettingsPanel::showIdentity() {
+    emit detailRequested(settingsScroll(this, new RadioEditorPanel(client_, RadioEditorPanel::Name, this)), ui("Имя"));
+}
+
+void RadioSettingsPanel::showParameters() {
+    auto* panel = new RadioEditorPanel(client_, RadioEditorPanel::Frequency, this);
+    emit detailRequested(settingsScroll(this, panel), ui("Частота и мощность"));
+}
+
+void RadioSettingsPanel::showContacts() {
+    auto* panel = new RadioEditorPanel(client_, RadioEditorPanel::Contacts, this);
+    emit detailRequested(settingsScroll(this, panel), ui("Контакты"));
+}
+
+void RadioSettingsPanel::showAttachments() {
+    auto* panel = new AttachmentSettingsPanel(this);
+    connect(panel, SIGNAL(saved()), this, SLOT(updateStatus()), Qt::QueuedConnection);
+    emit detailRequested(settingsScroll(this, panel), ui("Вложения"));
+}
+
+void RadioSettingsPanel::showBackup() {
+    auto* panel = new RadioBackupPanel(client_, this);
+    connect(panel, SIGNAL(detailRequested(QWidget*,QString)), this, SIGNAL(detailRequested(QWidget*,QString)));
+    connect(panel, SIGNAL(detailCloseRequested(QWidget*)), this, SIGNAL(detailCloseRequested(QWidget*)));
+    emit detailRequested(settingsScroll(this, panel), ui("Копия и перенос"));
+}
+
+void RadioSettingsPanel::showAir() {
+    emit detailRequested(settingsScroll(this, new RadioAirPanel(client_, this)), ui("В эфире"));
+}
+
+void RadioSettingsPanel::showMaintenance() {
+    auto* panel = new RadioMaintenancePanel(client_, this);
+    emit detailRequested(settingsScroll(this, panel), ui("Перезагрузка, сброс, стирание"));
+}
+namespace {
+
+QString accessLabel(int mode);
+
+std::optional<qint32> coordinate(const QLineEdit* field, int limit) {
+    bool valid = false;
+    const double value = field->text().trimmed().replace(QLatin1Char(','), QLatin1Char('.')).toDouble(&valid);
+    if (!valid || !std::isfinite(value) || value < -limit || value > limit)
+        return std::nullopt;
+    return static_cast<qint32>(qRound64(value * 1000000.0));
+}
+
+void appendCoordinate(meshcore::Bytes& command, qint32 value) {
+    const auto bits = static_cast<quint32>(value);
+    for (unsigned shift = 0; shift < 32; shift += 8)
+        command.push_back(static_cast<std::uint8_t>(bits >> shift));
+}
+
+template <class Field>
+Field* privacyField(QVBoxLayout* group, const char* text, const char* name) {
+    auto* field = new Field(group->parentWidget());
+    addText(group, ui(text), group->parentWidget())->setContentsMargins(8, 6, 8, 2);
+    field->setObjectName(QLatin1String(name));
+    field->setMinimumHeight(40);
+    group->addWidget(field);
+    return field;
+}
+
+} // namespace
+
+void RadioSettingsPanel::showLocation() {
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* coords = settingsGroup(layout, page, ui("МЕСТОПОЛОЖЕНИЕ"));
+    privacyLatitude_ = privacyField<QLineEdit>(coords, "Широта", "privacyLatitude");
+    privacyLongitude_ = privacyField<QLineEdit>(coords, "Долгота", "privacyLongitude");
+    for (QLineEdit* field : {privacyLatitude_.data(), privacyLongitude_.data()}) {
+        field->setMaxLength(16);
+        field->setInputMethodHints(Qt::ImhFormattedNumbersOnly);
+        connect(field, SIGNAL(textChanged(QString)), this, SLOT(updatePrivacyControls()));
+    }
+    privacyShare_ = addSettingsRow(coords, "Место на карте у других", "privacyShare", SettingGlyph::Map, false);
+    privacyShare_->setCheckable(true);
+    connect(privacyShare_.data(), SIGNAL(toggled(bool)), this, SLOT(updatePrivacyControls()));
+    auto* access = settingsGroup(layout, page, ui("ПО ЗАПРОСУ"));
+    privacyBase_ = privacyField<QComboBox>(access, "Кто может запросить показания", "privacyReadingsAccess");
+    privacySensors_ = privacyField<QComboBox>(access, "Кто может запросить датчики", "privacySensorsAccess");
+    for (int mode = 0; mode < 3; ++mode) {
+        privacyBase_->addItem(accessLabel(mode));
+        privacySensors_->addItem(accessLabel(mode));
+    }
+    connect(privacyBase_.data(), SIGNAL(currentIndexChanged(int)), this, SLOT(updatePrivacyControls()));
+    connect(privacySensors_.data(), SIGNAL(currentIndexChanged(int)), this, SLOT(updatePrivacyControls()));
+    privacyTrusted_ = addSettingsRow(access, "Доверенные", "privacyTrusted", SettingGlyph::Contacts);
+    connect(privacyTrusted_.data(), SIGNAL(clicked()), this, SLOT(showTrustedContacts()), Qt::QueuedConnection);
+    privacySave_ = addSettingsButton(layout, ui("Сохранить на рации"), page, "privacyApply");
+    privacyFeedback_ = addText(layout, QString(), page);
+    privacyFeedback_->setObjectName(QLatin1String("privacyFeedback"));
+    connect(privacySave_.data(), SIGNAL(clicked()), this, SLOT(applyPrivacySettings()), Qt::QueuedConnection);
+    privacyRadioKey_.clear();
+    updatePrivacyControls();
+    layout->addStretch(1);
+    emit detailRequested(settingsScroll(this, page), ui("Приватность"));
+}
+
+void RadioSettingsPanel::updatePrivacyControls() {
+    if (!privacySave_)
+        return;
+    const bool online = client_.connected();
+    const bool supported = client_.radioProtocolVersion() >= 5;
+    const auto& identity = client_.radioIdentity();
+    if (!online)
+        privacyRadioKey_.clear();
+    const QString key = client_.selfNode().publicKey;
+    if (online && privacyRadioKey_ != key) {
+        privacyRadioKey_ = key;
+        QWidget* fields[] = {privacyLatitude_.data(), privacyLongitude_.data(), privacyShare_.data(),
+                             privacyBase_.data(), privacySensors_.data()};
+        for (QWidget* field : fields)
+            field->blockSignals(true);
+        privacyLatitude_->setText(QString::number(identity.latitude / 1000000.0, 'f', 6));
+        privacyLongitude_->setText(QString::number(identity.longitude / 1000000.0, 'f', 6));
+        privacyShare_->setChecked(identity.advertLocPolicy != 0);
+        privacyBase_->setCurrentIndex(qMin<int>(2, identity.telemetryModes & 3));
+        privacySensors_->clear();
+        const int base = privacyBase_->currentIndex();
+        for (int mode = 0; mode <= base; ++mode)
+            privacySensors_->addItem(accessLabel(mode));
+        privacySensors_->setCurrentIndex(qMin<int>(base, (identity.telemetryModes >> 4) & 3));
+        for (QWidget* field : fields)
+            field->blockSignals(false);
+    }
+    const int base = privacyBase_->currentIndex();
+    if (privacySensors_->count() != base + 1) {
+        const int old = privacySensors_->currentIndex();
+        privacySensors_->blockSignals(true);
+        privacySensors_->clear();
+        for (int mode = 0; mode <= base; ++mode)
+            privacySensors_->addItem(accessLabel(mode));
+        privacySensors_->setCurrentIndex(qBound(0, old, base));
+        privacySensors_->blockSignals(false);
+    }
+    const auto latitude = coordinate(privacyLatitude_, 90);
+    const auto longitude = coordinate(privacyLongitude_, 180);
+    const bool changedPosition = latitude && longitude && (*latitude != identity.latitude || *longitude != identity.longitude);
+    const bool changedAccess = supported && (privacyShare_->isChecked() != (identity.advertLocPolicy != 0) ||
+        base != qMin<int>(2, identity.telemetryModes & 3) ||
+        privacySensors_->currentIndex() != qMin<int>(base, (identity.telemetryModes >> 4) & 3));
+    const bool idle = online && !privacyRequest_;
+    privacyLatitude_->setEnabled(idle);
+    privacyLongitude_->setEnabled(idle);
+    privacyShare_->setEnabled(idle && supported);
+    privacyBase_->setEnabled(idle && supported);
+    privacySensors_->setEnabled(idle && supported && base > 0);
+    privacyTrusted_->setEnabled(idle && supported && !changedPosition && !changedAccess);
+    setRowValue(privacyTrusted_, supported ? QString::number(client_.trustedContactKeys().size()) : ui("—"));
+    privacySave_->setEnabled(idle && latitude && longitude && (changedPosition || changedAccess));
+    privacyFeedback_->setText(!online ? ui("Подключите рацию.") :
+        privacyRequest_ ? ui("Сохраняю на рации…") :
+        !latitude || !longitude ? ui("Допустимые координаты: широта ±90°, долгота ±180°.") :
+        !supported ? ui("Эта прошивка не поддерживает настройки доступа к показаниям.") :
+        privacyFeedback_->property("result").toString());
+}
+
+void RadioSettingsPanel::applyPrivacySettings() {
+    if (!privacySave_ || !privacySave_->isEnabled())
+        return;
+    const auto latitude = coordinate(privacyLatitude_, 90);
+    const auto longitude = coordinate(privacyLongitude_, 180);
+    if (!latitude || !longitude)
+        return;
+    const auto& identity = client_.radioIdentity();
+    std::vector<meshcore::Bytes> commands;
+    if (client_.radioProtocolVersion() >= 5) {
+        const bool share = privacyShare_->isChecked();
+        const int base = privacyBase_->currentIndex();
+        const int sensors = privacySensors_->currentIndex();
+        const bool changedAccess = base != qMin<int>(2, identity.telemetryModes & 3) ||
+                                   sensors != qMin<int>(base, (identity.telemetryModes >> 4) & 3);
+        const auto modes = changedAccess
+            ? static_cast<std::uint8_t>((identity.telemetryModes & 0xc0) | (sensors << 4) |
+                (qMin<int>(base, (identity.telemetryModes >> 2) & 3) << 2) | base)
+            : identity.telemetryModes;
+        const auto visibility = share == (identity.advertLocPolicy != 0)
+            ? identity.advertLocPolicy : static_cast<std::uint8_t>(share ? 1 : 0);
+        if (modes != identity.telemetryModes || visibility != identity.advertLocPolicy)
+            commands.push_back({38, identity.manualAddContacts, modes, visibility, identity.multiAcks});
+    }
+    if (*latitude != identity.latitude || *longitude != identity.longitude) {
+        meshcore::Bytes command{14};
+        appendCoordinate(command, *latitude);
+        appendCoordinate(command, *longitude);
+        commands.push_back(command);
+    }
+    const int request = client_.nextConsoleRequestId();
+    if (!commands.empty() && client_.applyRadioSettings(request, commands)) {
+        privacyRequest_ = request;
+        privacyFeedback_->setProperty("result", QString());
+    } else {
+        privacyFeedback_->setProperty("result", ui("Не удалось поставить изменение в очередь."));
+    }
+    updatePrivacyControls();
+}
+
+void RadioSettingsPanel::showTrustedContacts() {
+    auto* page = new QWidget(this);
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    auto* rows = settingsGroup(layout, page, ui("ДОВЕРЕННЫЕ"));
+    trustedContacts_ = privacyField<QComboBox>(rows, "Контакт", "privacyContact");
+    trustedChange_ = addSettingsButton(rows, QString(), rows->parentWidget(), "privacyTrustChange");
+    trustedFeedback_ = addText(layout, QString(), page);
+    connect(trustedContacts_.data(), SIGNAL(currentIndexChanged(int)), this, SLOT(updateTrustedContactSelection()));
+    connect(trustedChange_.data(), SIGNAL(clicked()), this, SLOT(setSelectedTrustedContact()), Qt::QueuedConnection);
+    connect(addSettingsButton(layout, ui("К приватности"), page, "privacyReturn"), SIGNAL(clicked()),
+            this, SLOT(showLocation()), Qt::QueuedConnection);
+    refreshTrustedContacts();
+    layout->addStretch(1);
+    emit detailRequested(settingsScroll(this, page), ui("Доверенные"));
+}
+
+void RadioSettingsPanel::refreshTrustedContacts() {
+    if (!trustedContacts_)
+        return;
+    const QSet<QString> trusted = client_.trustedContactKeys();
+    const QString current = trustedContacts_->itemData(trustedContacts_->currentIndex()).toString();
+    QStringList keys;
+    QStringList labels;
+    if (client_.connected()) {
+        const QVector<NetworkNode> nodes = client_.nodes();
+        for (const NetworkNode& node : nodes) {
+            const bool allowed = trusted.contains(node.publicKey);
+            if (node.publicKey.isEmpty() || (node.role != 1 && !allowed))
+                continue;
+            keys.append(node.publicKey);
+            labels.append((allowed ? ui("✓ ") : QString()) + node.title + ui(" · ") + node.publicKey.left(8));
+        }
+    }
+    if (keys != trustedContacts_->property("keys").toStringList() ||
+        labels != trustedContacts_->property("labels").toStringList()) {
+        trustedContacts_->blockSignals(true);
+        trustedContacts_->clear();
+        for (int index = 0; index < keys.size(); ++index)
+            trustedContacts_->addItem(labels[index], keys[index]);
+        trustedContacts_->setCurrentIndex(qMax(0, keys.indexOf(current)));
+        trustedContacts_->setProperty("keys", keys);
+        trustedContacts_->setProperty("labels", labels);
+        trustedContacts_->blockSignals(false);
+    }
+    updateTrustedContactSelection();
+}
+
+void RadioSettingsPanel::updateTrustedContactSelection() {
+    if (!trustedChange_)
+        return;
+    const QString key = trustedContacts_->itemData(trustedContacts_->currentIndex()).toString();
+    const bool allowed = client_.trustedContactKeys().contains(key);
+    const bool active = client_.radioProtocolVersion() >= 5 && !key.isEmpty() && !trustRequest_;
+    trustedChange_->setText(allowed ? ui("Убрать из доверенных") : ui("Добавить в доверенные"));
+    trustedChange_->setEnabled(active);
+    trustedContacts_->setEnabled(active);
+    trustedFeedback_->setText(trustRequest_ ? ui("Сохраняю на рации…") :
+        !client_.connected() ? ui("Подключите рацию.") :
+        key.isEmpty() ? ui("Подходящих контактов пока нет.") : trustedFeedback_->property("result").toString());
+}
+
+void RadioSettingsPanel::setSelectedTrustedContact() {
+    if (!trustedChange_ || !trustedChange_->isEnabled())
+        return;
+    const QString key = trustedContacts_->itemData(trustedContacts_->currentIndex()).toString();
+    const int id = client_.nextConsoleRequestId();
+    if (client_.setTrustedContact(id, key, !client_.trustedContactKeys().contains(key)))
+        trustRequest_ = id;
+    else
+        trustedFeedback_->setProperty("result", ui("Не удалось поставить изменение в очередь."));
+    updateTrustedContactSelection();
+}
+
+void RadioSettingsPanel::finishPrivacySettings(int requestId, bool success, const QString& status) {
+    if (requestId == privacyRequest_) {
+        privacyRequest_ = 0;
+        if (privacyFeedback_) {
+            if (success)
+                privacyRadioKey_.clear();
+            privacyFeedback_->setProperty("result", status);
+            updatePrivacyControls();
+        }
+    } else if (requestId == trustRequest_) {
+        trustRequest_ = 0;
+        if (trustedFeedback_) {
+            trustedFeedback_->setProperty("result", status);
+            refreshTrustedContacts();
+        }
+    }
+}
 void RadioSettingsPanel::showBattery() {
+    auto* page = new QWidget(this);
+    batteryPage_ = page;
+    auto* layout = new QVBoxLayout(page);
+    layout->setContentsMargins(0, 0, 0, 0);
+    batteryState_ = addText(layout, QString(), page);
+    batteryState_->setObjectName(QLatin1String("readingsStatus"));
+    auto* tiles = new QGridLayout;
+    tiles->setSpacing(6);
+    layout->addLayout(tiles);
+    const char* titles[] = {"Батарея", "Шум", "В эфире", "Работает", "Температура платы", "Передача / приём"};
+    const char* names[] = {"readingsBattery", "readingsNoise", "readingsAir", "readingsUptime",
+                           "readingsTemperature", "readingsTxRx"};
+    for (int i = 0; i < 6; ++i) {
+        auto* tile = new QWidget(page);
+        tile->setObjectName(QLatin1String("settingsGroup"));
+        tile->setAttribute(Qt::WA_StyledBackground);
+        auto* fields = new QVBoxLayout(tile);
+        fields->setContentsMargins(10, 8, 10, 9);
+        addText(fields, ui(titles[i]), tile)->setObjectName(QLatin1String("muted"));
+        QLabel* value = addText(fields, ui("—"), tile);
+        value->setObjectName(QLatin1String(names[i]));
+        value->setStyleSheet(QLatin1String("font-size: 21px; font-weight: bold;"));
+        tiles->addWidget(tile, i / 2, i % 2);
+    }
+    batteryRefresh_ = addSettingsButton(layout, ui("Обновить"), page, "refreshBattery");
+    connect(batteryRefresh_.data(), SIGNAL(clicked()), this, SLOT(refreshBatteryReadout()), Qt::QueuedConnection);
+    auto* privacy = settingsGroup(layout, page, QString());
+    batteryPrivacy_ = addSettingsRow(privacy, "Кто может запросить показания", "readingsPrivacy", SettingGlyph::Privacy);
+    connect(batteryPrivacy_.data(), SIGNAL(clicked()), this, SLOT(showLocation()), Qt::QueuedConnection);
+    layout->addStretch(1);
+    auto* timer = new QTimer(page);
+    connect(timer, SIGNAL(timeout()), this, SLOT(refreshBatteryReadout()));
+    timer->start(30000);
     refreshBatteryReadout();
-    displayReadout(Readout::Battery, ui("Показания"));
+    emit detailRequested(settingsScroll(this, page), ui("Показания"));
 }
 
 void RadioSettingsPanel::refreshBatteryReadout() {
     if (client_.connected())
-        client_.requestBattery();
+        client_.requestRadioReadings();
+    updateBatteryPage();
+}
+
+namespace {
+
+QString durationReading(quint32 seconds) {
+    if (seconds < 60)
+        return ui("%1 с").arg(seconds);
+    if (seconds < 3600)
+        return ui("%1 мин").arg(seconds / 60);
+    return ui("%1 ч %2 мин").arg(seconds / 3600).arg(seconds / 60 % 60);
+}
+
+QString accessLabel(int mode) {
+    const char* labels[] = {"Никто", "Доверенные", "Все"};
+    return ui(labels[qBound(0, mode, 2)]);
+}
+
+} // namespace
+
+void RadioSettingsPanel::updateBatteryPage() {
+    if (!batteryPage_)
+        return;
+    const bool online = client_.connected();
+    const bool pending = client_.radioReadingsPending();
+    const auto& values = client_.radioReadings();
+    const QString empty = ui("—");
+    const auto set = [&](const char* name, const QString& value) {
+        if (auto* label = batteryPage_->findChild<QLabel*>(QLatin1String(name)))
+            label->setText(value);
+    };
+    const auto decimal = [](double value, int digits) {
+        return QString::number(value, 'f', digits).replace(QLatin1Char('.'), QLatin1Char(','));
+    };
+    batteryState_->setText(!online ? ui("Подключите рацию.") :
+        pending ? ui("Запрашиваю показания…") : values.capturedAt
+            ? ui("Обновлено в %1").arg(QDateTime::fromTime_t(values.capturedAt).toString(QLatin1String("HH:mm:ss")))
+            : ui("Рация пока не вернула показания."));
+    set("readingsBattery", values.batteryMillivolts ? ui("%1 В").arg(decimal(*values.batteryMillivolts / 1000.0, 2)) : empty);
+    set("readingsNoise", values.noiseDbm ? ui("%1 дБм").arg(*values.noiseDbm) : empty);
+    set("readingsAir", values.noiseDbm && values.uptimeSeconds && *values.uptimeSeconds > 0
+        ? ui("%1%").arg(decimal(values.transmitSeconds * 100.0 / *values.uptimeSeconds, 1)) : empty);
+    set("readingsUptime", values.uptimeSeconds ? durationReading(*values.uptimeSeconds) : empty);
+    set("readingsTemperature", values.temperatureTenthsC ? ui("%1 °C").arg(decimal(*values.temperatureTenthsC / 10.0, 1)) : empty);
+    set("readingsTxRx", values.noiseDbm
+        ? ui("%1 / %2").arg(durationReading(values.transmitSeconds), durationReading(values.receiveSeconds)) : empty);
+    batteryRefresh_->setEnabled(online && !pending);
+    batteryRefresh_->setText(pending ? ui("Обновляю…") : ui("Обновить"));
+    setRowValue(batteryPrivacy_, client_.radioProtocolVersion() >= 5 ? accessLabel(client_.radioIdentity().telemetryModes & 3) : empty);
 }
 
 void RadioSettingsPanel::showAdvanced() {
@@ -658,6 +1092,11 @@ void RadioSettingsPanel::showAdvanced() {
             SIGNAL(clicked()), this, SLOT(refreshMessages()), Qt::QueuedConnection);
     connect(addSettingsRow(radio, "Сведения и диагностика", "radioInfo", SettingGlyph::About),
             SIGNAL(clicked()), this, SLOT(showInfo()), Qt::QueuedConnection);
+    auto* clock = settingsGroup(layout, page, ui("ЧАСЫ"));
+    clockRow_ = addSettingsRow(clock, "Выставить часы радио по телефону", "localRadioClock", SettingGlyph::Readings, false);
+    connect(clockRow_.data(), SIGNAL(clicked()), this, SLOT(setRadioClock()), Qt::QueuedConnection);
+    clockFeedback_ = addText(layout, QString(), page);
+    clockFeedback_->hide();
     auto* app = settingsGroup(layout, page, ui("ИНСТРУМЕНТЫ BELLE"));
     mapsRow_ = addSettingsRow(app, "Карты", "onlineMap", SettingGlyph::Map);
     connect(mapsRow_.data(), SIGNAL(clicked()), this, SIGNAL(mapSettingsRequested()));
@@ -668,6 +1107,35 @@ void RadioSettingsPanel::showAdvanced() {
     layout->addStretch(1);
     updateStatus();
     emit detailRequested(settingsScroll(this, page), ui("Дополнительно"));
+}
+
+void RadioSettingsPanel::setRadioClock() {
+    if (!client_.connected() || clockRequest_)
+        return;
+    const quint32 now = QDateTime::currentDateTime().toTime_t();
+    meshcore::Bytes command{6};
+    for (int shift = 0; shift < 32; shift += 8)
+        command.push_back(static_cast<std::uint8_t>(now >> shift));
+    const int request = client_.nextConsoleRequestId();
+    const bool queued = client_.applyRadioSettings(request, {command}, false);
+    if (queued)
+        clockRequest_ = request;
+    if (clockFeedback_) {
+        clockFeedback_->setText(queued ? ui("Выставляем время…") : ui("Дождитесь окончания текущего запроса."));
+        clockFeedback_->show();
+    }
+    updateStatus();
+}
+
+void RadioSettingsPanel::clockResult(int request, bool success, const QString& status) {
+    if (request != clockRequest_)
+        return;
+    clockRequest_ = 0;
+    if (clockFeedback_) {
+        clockFeedback_->setText(success ? ui("Часы радио выставлены.") : status);
+        clockFeedback_->show();
+    }
+    updateStatus();
 }
 
 void RadioSettingsPanel::showNotifications() {
@@ -684,6 +1152,10 @@ void RadioSettingsPanel::showNotifications() {
     connect(preferenceToggle(messages, "Сообщения каналов", "ui/notifyChannels", true,
                              SettingGlyph::Channel),
             SIGNAL(toggled(bool)), this, SLOT(setUserPreference(bool)), Qt::QueuedConnection);
+    auto* sound = settingsGroup(layout, page, ui("ЗВУК"));
+    notificationSoundRow_ = addSettingsRow(sound, "Звук", "defaultNotificationSound", SettingGlyph::Sound);
+    setRowValue(notificationSoundRow_.data(), NodeChatOptions::defaultLabel(NodeChatOptions::Sound));
+    connect(notificationSoundRow_.data(), SIGNAL(clicked()), this, SLOT(chooseNotificationSound()), Qt::QueuedConnection);
     auto* haptics = settingsGroup(layout, page, ui("ВИБРАЦИЯ"));
     auto* vibration = preferenceToggle(haptics, "Вибрация при сообщении", "ui/vibration", false,
                                        SettingGlyph::Notifications, ui("Пока приложение открыто."));
@@ -698,6 +1170,11 @@ void RadioSettingsPanel::showNotifications() {
     notificationFeedback_->hide();
     layout->addStretch(1);
     emit detailRequested(settingsScroll(this, page), ui("Уведомления"));
+}
+
+void RadioSettingsPanel::chooseNotificationSound() {
+    if (notificationSoundRow_ && NodeChatOptions::chooseDefault(NodeChatOptions::Sound, this))
+        setRowValue(notificationSoundRow_.data(), NodeChatOptions::defaultLabel(NodeChatOptions::Sound));
 }
 
 void RadioSettingsPanel::showLog() {
@@ -983,23 +1460,6 @@ void RadioSettingsPanel::setUserPreference(bool enabled) {
     }
 }
 
-void RadioSettingsPanel::displayReadout(Readout readout, const QString& title) {
-    client_.traceConnection("UI: open radio readout", static_cast<int>(readout));
-    auto* page = new QWidget(this);
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 0, 0, 0);
-    liveReadout_ = addText(layout, QString(), page);
-    liveReadout_->setObjectName(QLatin1String("radioReadout"));
-    reading_ = readout;
-    updateStatus();
-    if (readout == Readout::Battery) {
-        connect(addSettingsButton(layout, ui("Обновить"), page, "refreshBattery"), SIGNAL(clicked()),
-                this, SLOT(refreshBatteryReadout()), Qt::QueuedConnection);
-    }
-    layout->addStretch(1);
-    emit detailRequested(page, title);
-}
-
 void RadioSettingsPanel::updateStatus() {
     const bool online = client_.connected();
     const QString empty = ui("—");
@@ -1015,7 +1475,10 @@ void RadioSettingsPanel::updateStatus() {
     const QVector<NetworkNode> nodes = client_.nodes();
     setRowValue(contactsRow_, QString::number(nodes.size()));
     const bool positioned = online && hasPosition(client_.selfNode());
-    setRowValue(locationRow_, online ? positioned ? ui("Есть координаты") : ui("Не указано") : empty);
+    const QString location = client_.radioProtocolVersion() >= 5
+        ? client_.radioIdentity().advertLocPolicy ? ui("Место видно всем") : ui("Место скрыто")
+        : positioned ? ui("Есть координаты") : ui("Не указано");
+    setRowValue(locationRow_, online ? location : empty);
     if (channelsRow_) {
         QString slotsUsed = empty;
         if (online) {
@@ -1028,6 +1491,9 @@ void RadioSettingsPanel::updateStatus() {
         setRowValue(channelsRow_, slotsUsed);
     }
     setRowValue(connectionRow_, ui("Wi‑Fi / TCP"));
+    setRowValue(attachmentsRow_, Attachments::statusText());
+    if (clockRow_)
+        clockRow_->setEnabled(online && !clockRequest_ && !client_.busy());
     const QSettings preferences;
     const bool quiet = preferences.value(QLatin1String("ui/doNotDisturb"), false).toBool();
     setRowValue(notificationsRow_, quiet ? ui("Не беспокоить") :
@@ -1046,43 +1512,11 @@ void RadioSettingsPanel::updateStatus() {
         refreshRow_->setEnabled(online && !client_.busy());
     if (demo_)
         demo_->setText(demoRadioActive(client_) ? ui("Выйти из демо") : ui("Демо"));
-    if (!liveReadout_)
-        return;
-    QString text;
-    switch (reading_) {
-    case Readout::Info: text = client_.radioInfo(); break;
-    case Readout::Identity:
-        text = name.isEmpty() ? ui("Имя ноды ещё не получено.") : name;
-        break;
-    case Readout::Parameters: text = client_.radioParameters(); break;
-    case Readout::Battery: text = client_.batteryInfo(); break;
-    case Readout::Contacts: {
-        int people = 0;
-        int repeaters = 0;
-        int rooms = 0;
-        int sensors = 0;
-        for (const auto& node : nodes) {
-            people += node.role == 1;
-            repeaters += node.role == 2;
-            rooms += node.role == 3;
-            sensors += node.role == 4;
-        }
-        text = ui("Узлов в списке: %1\nЛюди: %2\nРепитеры: %3\nКомнаты: %4\nДатчики: %5")
-            .arg(nodes.size()).arg(people).arg(repeaters).arg(rooms).arg(sensors);
-        break;
-    }
-    case Readout::Location: {
-        const NetworkNode self = client_.selfNode();
-        if (client_.connected() && hasPosition(self)) {
-            text = ui("Широта: %1\nДолгота: %2")
-                .arg(self.latitude / 1000000.0, 0, 'f', 6).arg(self.longitude / 1000000.0, 0, 'f', 6);
-        } else {
-            text = ui("Координаты ноды ещё не получены.");
-        }
-        break;
-    }
-    }
-    liveReadout_->setText(text.isEmpty() ? ui("Нет показаний.") : text);
+    updateBatteryPage();
+    updatePrivacyControls();
+    refreshTrustedContacts();
+    if (liveReadout_)
+        liveReadout_->setText(client_.radioInfo());
 }
 
 void RadioSettingsPanel::advertise() {

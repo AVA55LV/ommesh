@@ -26,8 +26,6 @@
 #include <QtGui/QMenu>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
-#include <QtGui/QPainterPath>
-#include <QtGui/QPolygon>
 #include <QtGui/QPushButton>
 #include <QtGui/QToolButton>
 #include <QtGui/QVBoxLayout>
@@ -60,7 +58,7 @@ const int AtlasVertexLimit = 48000;
 const int TileSide = 256;
 const int MaximumTileBytes = 160 * 1024;
 const int MaximumOnlineZoom = 17;
-const int MaximumOfflineZoom = 19;
+const int MinimumOfflineScaleMeters = 200;
 const int MinimumOnlineZoom = 1;
 const int CameraDuration = 165;
 const int CameraFrame = 26;
@@ -69,6 +67,7 @@ const int EmptyY = 55000000;
 const double Pi = 3.14159265358979323846;
 const double FullLongitude = 360000000.0;
 const double MaxLatitude = 85.05112878;
+const double EarthCircumferenceMeters = 40030230.0;
 
 QString ru(const char* text) { return QString::fromUtf8(text); }
 QColor color(QRgb rgb) { return QColor::fromRgb(rgb); }
@@ -284,6 +283,10 @@ public:
     }
 
 protected:
+    void nextCheckState() override {
+        // The window changes the Expand button only after accepting the navigation.
+    }
+
     void paintEvent(QPaintEvent*) override {
         const Appearance::Palette palette = Appearance::paletteFor(this);
         QPainter painter(this);
@@ -426,244 +429,6 @@ bool intersects(const QRectF& lhs, const QRectF& rhs) {
         && lhs.top() <= rhs.bottom() && lhs.bottom() >= rhs.top();
 }
 
-const int BuildingZoom = 14;
-const int HouseNumberZoom = 16;
-const int BuildingSectorZoom = 15;
-const int BuildingSectorsPerAxis = 1 << BuildingSectorZoom;
-const int SectorSubdivisions = 4096;
-const int MaximumSectorBytes = 256 * 1024;
-const QRgb BuildingFill = 0x43545c;
-const QRgb BuildingOutline = 0x657982;
-const QRgb HouseNumberText = 0xffe1ab;
-
-struct BuildingShape {
-    QVector<QPolygon> rings;
-    QRect bounds;
-};
-
-struct HouseNumber {
-    QPoint anchor;
-    QString value;
-};
-
-struct BuildingSector {
-    QVector<BuildingShape> shapes;
-    QVector<HouseNumber> numbers;
-};
-
-quint32 sectorKey(int x, int y) {
-    return (static_cast<quint32>(x) << 16) | static_cast<quint32>(y);
-}
-
-QPoint sectorPosition(quint32 key) {
-    return QPoint(key >> 16, key & 0xffff);
-}
-
-class BuildingLayer {
-public:
-    BuildingLayer() : file_(QLatin1String(":/maps/omsk-buildings.bin")), sectors_(3 * 1024 * 1024) {}
-
-    int open() {
-        if (tried_) {
-            return index_.size();
-        }
-        tried_ = true;
-        if (!file_.open(QIODevice::ReadOnly) || !readIndex()) {
-            index_.clear();
-            file_.close();
-        }
-        return index_.size();
-    }
-
-    bool tried() const { return tried_; }
-
-    const BuildingSector* cached(quint32 key) const { return sectors_.object(key); }
-
-    void releaseSectors() { sectors_.clear(); }
-
-    bool load(quint32 key) {
-        if (sectors_.contains(key) || rejected_.contains(key)) {
-            return false;
-        }
-        const auto entry = index_.constFind(key);
-        if (entry == index_.constEnd()) {
-            return false;
-        }
-        if (!file_.seek(entry.value().offset)) {
-            rejected_.insert(key);
-            return false;
-        }
-        const QByteArray compressed = file_.read(entry.value().length);
-        if (compressed.size() < 5 || bigEndian(compressed, 0) > MaximumSectorBytes) {
-            rejected_.insert(key);
-            return false;
-        }
-        const QByteArray raw = qUncompress(compressed);
-        auto* tile = new BuildingSector;
-        int cost = 0;
-        if (!decode(raw, *tile, cost, compact_)) {
-            delete tile;
-            rejected_.insert(key);
-            return false;
-        }
-        return sectors_.insert(key, tile, cost);
-    }
-
-private:
-    struct Entry {
-        quint32 offset;
-        quint32 length;
-    };
-
-    bool readIndex() {
-        QDataStream input(&file_);
-        quint32 magic;
-        quint8 zoom;
-        quint16 count;
-        input >> magic >> zoom >> count;
-        compact_ = magic == 0x4f4d4832u;
-        if (input.status() != QDataStream::Ok || (!compact_ && magic != 0x4f4d4831u)
-            || zoom != BuildingSectorZoom || count > 8192) {
-            return false;
-        }
-        const qint64 fileSize = file_.size();
-        quint32 previousEnd = 7 + count * 12;
-        index_.reserve(count);
-        for (int i = 0; i < count; ++i) {
-            quint16 x, y;
-            Entry entry;
-            input >> x >> y >> entry.offset >> entry.length;
-            if (input.status() != QDataStream::Ok || x >= BuildingSectorsPerAxis || y >= BuildingSectorsPerAxis
-                || entry.offset < previousEnd || entry.length < 5 || entry.length > MaximumSectorBytes
-                || static_cast<qint64>(entry.offset) + entry.length > fileSize) {
-                return false;
-            }
-            const quint32 key = sectorKey(x, y);
-            if (index_.contains(key)) {
-                return false;
-            }
-            index_.insert(key, entry);
-            previousEnd = entry.offset + entry.length;
-        }
-        return input.status() == QDataStream::Ok;
-    }
-
-    static bool readVarUInt(QDataStream& input, quint32& value) {
-        value = 0;
-        for (int shift = 0; shift <= 14; shift += 7) {
-            quint8 byte;
-            input >> byte;
-            if (input.status() != QDataStream::Ok) {
-                return false;
-            }
-            value |= static_cast<quint32>(byte & 127) << shift;
-            if (!(byte & 128)) {
-                return true;
-            }
-        }
-        return false;
-    }
-
-    static bool readDelta(QDataStream& input, int& coordinate) {
-        quint32 encoded;
-        if (!readVarUInt(input, encoded) || encoded > 131070) {
-            return false;
-        }
-        const int magnitude = static_cast<int>(encoded >> 1);
-        coordinate += (encoded & 1) ? -magnitude - 1 : magnitude;
-        return coordinate >= -32768 && coordinate <= 32767;
-    }
-
-    static bool decode(const QByteArray& raw, BuildingSector& sector, int& cost, bool compact) {
-        QDataStream input(raw);
-        quint16 shapeCount, numberCount;
-        input >> shapeCount >> numberCount;
-        if (input.status() != QDataStream::Ok || shapeCount > 4096 || numberCount > 4096) {
-            return false;
-        }
-        cost = sizeof(BuildingSector) + shapeCount * sizeof(BuildingShape) + numberCount * sizeof(HouseNumber);
-        sector.shapes.reserve(shapeCount);
-        sector.numbers.reserve(numberCount);
-        int anchorX = 0;
-        int anchorY = 0;
-        for (int i = 0; i < shapeCount; ++i) {
-            quint8 ringCount;
-            input >> ringCount;
-            if (input.status() != QDataStream::Ok || ringCount < 1 || ringCount > 24) {
-                return false;
-            }
-            BuildingShape shape;
-            shape.rings.reserve(ringCount);
-            cost += ringCount * (sizeof(QPolygon) + 32);
-            for (int r = 0; r < ringCount; ++r) {
-                quint32 size;
-                if (compact) {
-                    if (!readVarUInt(input, size)) {
-                        return false;
-                    }
-                } else {
-                    quint16 legacySize;
-                    input >> legacySize;
-                    size = legacySize;
-                }
-                if (input.status() != QDataStream::Ok || size < 3 || size > 512) {
-                    return false;
-                }
-                QPolygon polygon;
-                polygon.reserve(size);
-                if (compact) {
-                    int x = anchorX;
-                    int y = anchorY;
-                    for (quint32 j = 0; j < size; ++j) {
-                        if (!readDelta(input, x) || !readDelta(input, y)) {
-                            return false;
-                        }
-                        polygon.append(QPoint(x, y));
-                    }
-                    anchorX = polygon.first().x();
-                    anchorY = polygon.first().y();
-                } else {
-                    for (quint32 j = 0; j < size; ++j) {
-                        qint16 x, y;
-                        input >> x >> y;
-                        polygon.append(QPoint(x, y));
-                    }
-                    if (input.status() != QDataStream::Ok) {
-                        return false;
-                    }
-                }
-                cost += size * sizeof(QPoint);
-                shape.rings.append(polygon);
-            }
-            shape.bounds = shape.rings.first().boundingRect();
-            sector.shapes.append(shape);
-        }
-        for (int i = 0; i < numberCount; ++i) {
-            qint16 x, y;
-            quint8 length;
-            input >> x >> y >> length;
-            if (x < 0 || x >= SectorSubdivisions || y < 0 || y >= SectorSubdivisions || length < 1 || length > 48) {
-                return false;
-            }
-            char text[48];
-            if (input.readRawData(text, length) != length) {
-                return false;
-            }
-            HouseNumber mark = {QPoint(x, y), QString::fromUtf8(text, length)};
-            cost += 24 + mark.value.size() * sizeof(QChar);
-            sector.numbers.append(mark);
-        }
-        return input.status() == QDataStream::Ok && input.atEnd();
-    }
-
-    QFile file_;
-    QHash<quint32, Entry> index_;
-    QCache<quint32, BuildingSector> sectors_;
-    QSet<quint32> rejected_;
-    bool tried_ = false;
-    bool compact_ = false;
-};
-
 }  // namespace
 
 struct NodeMap::State {
@@ -671,7 +436,6 @@ struct NodeMap::State {
         : owner(owner), memory(16 * TileSide * TileSide * 4), center(project(EmptyY, EmptyX)) {
         settle.setSingleShot(true);
         deadline.setSingleShot(true);
-        buildingTimer.setSingleShot(true);
     }
 
     NodeMap* owner;
@@ -682,7 +446,6 @@ struct NodeMap::State {
     QCache<QString, CachedImage> memory;
     QTimer settle;
     QTimer deadline;
-    QTimer buildingTimer;
     QTimer camera;
     QElapsedTimer cameraClock;
     QPointF cameraFrom;
@@ -690,9 +453,6 @@ struct NodeMap::State {
     double cameraScale = 0.0;
     double cameraFromScale = 0.0;
     int cameraZoom = 8;
-    BuildingLayer buildings;
-    QVector<quint32> buildingView;
-    QVector<quint32> buildingQueue;
     QNetworkReply* reply = nullptr;
     QUrl replyCacheUrl;
     QString replyKey;
@@ -844,7 +604,30 @@ struct NodeMap::State {
     }
 
     int minimumZoom() const { return source == Offline ? 0 : MinimumOnlineZoom; }
-    int maximumZoom() const { return source == Offline ? MaximumOfflineZoom : MaximumOnlineZoom; }
+    int scaleBarWidth() const { return qMin(64, qMax(22, mapRect().width() / 4)); }
+
+    static double worldWidthMeters(const QPointF& position) {
+        return EarthCircumferenceMeters / std::cosh((0.5 - position.y()) * 2 * Pi);
+    }
+
+    double offlineScaleLimit(const QPointF& position) const {
+        // Fit at least 200 m in the scale bar at the center latitude.
+        return scaleBarWidth() * worldWidthMeters(position) / MinimumOfflineScaleMeters;
+    }
+
+    int maximumZoom(const QPointF& position) const {
+        if (source == Loopback)
+            return MaximumOnlineZoom;
+        const double limit = offlineScaleLimit(position);
+        int level = 0;
+        while (zoomScale(level + 1) <= limit)
+            ++level;
+        return level;
+    }
+
+    int boundedZoom(int level, const QPointF& position) const {
+        return qBound(minimumZoom(), level, maximumZoom(position));
+    }
 
     QPair<QPointF, int> fittedView() const {
         QRectF regionBox = regionBounds(region);
@@ -877,7 +660,8 @@ struct NodeMap::State {
         const double limit = qMin(qMax(1, map.width() - 36) / std::max(minimumSpan, static_cast<double>(regionBox.width())),
                                   qMax(1, map.height() - 48) / std::max(minimumSpan, static_cast<double>(regionBox.height())));
         int level = minimumZoom();
-        while (level < maximumZoom() && zoomScale(level + 1) <= limit) {
+        const int maxLevel = maximumZoom(target);
+        while (level < maxLevel && zoomScale(level + 1) <= limit) {
             ++level;
         }
         return qMakePair(target, level);
@@ -950,9 +734,6 @@ struct NodeMap::State {
             return issue;
         }
         if (source == Offline) {
-            if (!buildingView.isEmpty() && zoom < HouseNumberZoom) {
-                return ru("Приблизьте для номеров домов");
-            }
             return worldTried && world.bounds.isEmpty() && detail.bounds.isEmpty()
                 ? ru("Офлайн: подложка недоступна")
                 : ru("Офлайн · узлы %1/%2").arg(pins.size()).arg(nodeCount);
@@ -1004,151 +785,8 @@ struct NodeMap::State {
         attempted.clear();
     }
 
-    void queueBuildings() {
-        QVector<quint32> wanted;
-        const QRect map = mapRect();
-        const QRectF world(areaTopLeft(map, 0), areaBottomRight(map, 0));
-        if (source == Offline && owner->isVisible() && zoom >= BuildingZoom
-            && intersects(world, regionBounds(OmskCity))) {
-            const QRectF area = world.intersected(regionBounds(OmskCity));
-            int left = static_cast<int>(std::floor(area.left() * BuildingSectorsPerAxis));
-            int right = static_cast<int>(std::floor(area.right() * BuildingSectorsPerAxis));
-            int top = static_cast<int>(std::floor(area.top() * BuildingSectorsPerAxis));
-            int bottom = static_cast<int>(std::floor(area.bottom() * BuildingSectorsPerAxis));
-            // Nokia's viewport needs at most six sectors on either axis at z14.
-            if (right - left >= 6) {
-                left = (left + right) / 2 - 2;
-                right = left + 5;
-            }
-            if (bottom - top >= 6) {
-                top = (top + bottom) / 2 - 2;
-                bottom = top + 5;
-            }
-            for (int y = top; y <= bottom; ++y) {
-                for (int x = left; x <= right; ++x) {
-                    wanted.append(sectorKey(x, y));
-                }
-            }
-            const QPoint middle = (center * BuildingSectorsPerAxis).toPoint();
-            std::sort(wanted.begin(), wanted.end(), [middle](quint32 a, quint32 b) {
-                return (sectorPosition(a) - middle).manhattanLength() < (sectorPosition(b) - middle).manhattanLength();
-            });
-        }
-        if (wanted == buildingView) {
-            if (!buildingQueue.isEmpty() && !buildingTimer.isActive())
-                buildingTimer.start(85);
-            return;
-        }
-        buildingView = wanted;
-        buildingQueue = wanted;
-        buildingTimer.stop();
-        if (!buildingQueue.isEmpty()) {
-            buildingTimer.start(85);
-        }
-    }
-
-    QPointF buildingOrigin(quint32 key) const {
-        const QPoint position = sectorPosition(key);
-        return screen(QPointF(position.x() / static_cast<double>(BuildingSectorsPerAxis),
-                              position.y() / static_cast<double>(BuildingSectorsPerAxis)));
-    }
-
-    bool drawBuildings(QPainter& painter, const QRect& map) const {
-        if (buildingView.isEmpty()) {
-            return false;
-        }
-        const double edge = scale() / BuildingSectorsPerAxis;
-        const double pixel = edge / SectorSubdivisions;
-        QPen outline(color(BuildingOutline));
-        outline.setCosmetic(true);
-        bool drawn = false;
-        for (int i = 0; i < buildingView.size(); ++i) {
-            const quint32 key = buildingView.at(i);
-            const BuildingSector* tile = buildings.cached(key);
-            if (!tile || tile->shapes.isEmpty()) {
-                continue;
-            }
-            const QPointF origin = buildingOrigin(key);
-            const QRectF tileRect(origin, QSizeF(edge, edge));
-            const QRectF onScreen = tileRect.intersected(QRectF(map));
-            if (onScreen.isEmpty()) {
-                continue;
-            }
-            const QRectF local((onScreen.topLeft() - origin) / pixel, onScreen.size() / pixel);
-            painter.save();
-            painter.setClipRect(tileRect, Qt::IntersectClip);
-            painter.translate(origin);
-            painter.scale(pixel, pixel);
-            painter.setPen(outline);
-            painter.setBrush(color(BuildingFill));
-            for (int j = 0; j < tile->shapes.size(); ++j) {
-                const BuildingShape& shape = tile->shapes.at(j);
-                if (!intersects(local, QRectF(shape.bounds))) {
-                    continue;
-                }
-                if (shape.rings.size() == 1) {
-                    painter.drawPolygon(shape.rings.first());
-                } else {
-                    QPainterPath path;
-                    for (int r = 0; r < shape.rings.size(); ++r) {
-                        path.addPolygon(QPolygonF(shape.rings.at(r)));
-                        path.closeSubpath();
-                    }
-                    painter.drawPath(path);
-                }
-                drawn = true;
-            }
-            painter.restore();
-        }
-        if (zoom >= HouseNumberZoom) {
-            drawn = drawHouseNumbers(painter, map, pixel) || drawn;
-        }
-        return drawn;
-    }
-
-    bool drawHouseNumbers(QPainter& painter, const QRect& map, double pixel) const {
-        painter.save();
-        QFont font = painter.font();
-        font.setPixelSize(11);
-        font.setBold(false);
-        painter.setFont(font);
-        const QFontMetrics metrics(font);
-        QVector<QRect> used;
-        for (int i = 0; i < buildingView.size() && used.size() < 96; ++i) {
-            const quint32 key = buildingView.at(i);
-            const BuildingSector* tile = buildings.cached(key);
-            if (!tile) {
-                continue;
-            }
-            const QPointF origin = buildingOrigin(key);
-            for (int j = 0; j < tile->numbers.size() && used.size() < 96; ++j) {
-                const HouseNumber& number = tile->numbers.at(j);
-                const QPoint anchor = (origin + QPointF(number.anchor) * pixel).toPoint();
-                if (!map.contains(anchor)) {
-                    continue;
-                }
-                const int width = metrics.width(number.value) + 4;
-                const int height = metrics.height() + 1;
-                const QRect label(anchor.x() - width / 2, anchor.y() - height / 2, width, height);
-                bool available = map.contains(label);
-                for (int k = 0; k < used.size() && available; ++k) {
-                    available = !used.at(k).intersects(label.adjusted(-1, -1, 1, 1));
-                }
-                if (available) {
-                    used.append(label);
-                    painter.fillRect(label, color(0x263941));
-                    painter.setPen(color(HouseNumberText));
-                    painter.drawText(label, Qt::AlignCenter, number.value);
-                }
-            }
-        }
-        painter.restore();
-        return !used.isEmpty();
-    }
-
     void updateView() {
         prepareAtlases();
-        queueBuildings();
         owner->update();
         schedule();
     }
@@ -1161,12 +799,12 @@ struct NodeMap::State {
     void setCamera(const QPointF& target, int level) {
         stopCamera();
         center = QPointF(wrapped(target.x()), target.y());
-        zoom = level;
+        zoom = boundedZoom(level, center);
         updateView();
     }
 
     void moveCamera(QPointF target, int level) {
-        level = qBound(minimumZoom(), level, maximumZoom());
+        level = boundedZoom(level, target);
         target.setX(nearX(target.x(), center.x()));
         const double currentScale = scale();
         const double targetScale = zoomScale(level);
@@ -1182,7 +820,6 @@ struct NodeMap::State {
         cameraScale = cameraFromScale = currentScale;
         cameraZoom = level;
         settle.stop();
-        buildingTimer.stop();
         cameraClock.start();
         camera.start(CameraFrame);
     }
@@ -1198,6 +835,8 @@ struct NodeMap::State {
         center = cameraFrom + (cameraTo - cameraFrom) * eased;
         center.setX(wrapped(center.x()));
         cameraScale = cameraFromScale + (zoomScale(cameraZoom) - cameraFromScale) * eased;
+        if (source == Offline)
+            cameraScale = qMin(cameraScale, offlineScaleLimit(center));
         owner->update();
     }
 
@@ -1215,6 +854,7 @@ struct NodeMap::State {
         stopCamera();
         center.setX(wrapped(center.x() - pixels.x() / scale()));
         center.setY(qBound(0.0, center.y() - pixels.y() / scale(), 1.0));
+        zoom = boundedZoom(zoom, center);
         framing = Manual;
         updateView();
     }
@@ -1409,11 +1049,7 @@ struct NodeMap::State {
         }
     }
 
-    bool drawTiles(QPainter& painter, const QVector<TilePlacement>& placements) const {
-        if (source == Offline) {
-            return false;
-        }
-        bool drawn = false;
+    void drawTiles(QPainter& painter, const QVector<TilePlacement>& placements) const {
         for (int i = 0; i < placements.size(); ++i) {
             const TilePlacement& tile = placements.at(i);
             const CachedImage* image = memory.object(tile.path());
@@ -1422,10 +1058,8 @@ struct NodeMap::State {
                     painter.drawImage(tile.rect.topLeft(), image->image);
                 else
                     painter.drawImage(tile.rect, image->image);
-                drawn = true;
             }
         }
-        return drawn;
     }
 
     void drawPin(QPainter& painter, const Pin& pin, const QPoint& position) const {
@@ -1542,7 +1176,6 @@ NodeMap::NodeMap(QWidget* parent) : QWidget(parent), state_(new State(this)) {
     connect(&state_->camera, SIGNAL(timeout()), this, SLOT(advanceCamera()));
     connect(&state_->settle, SIGNAL(timeout()), this, SLOT(loadVisibleTiles()));
     connect(&state_->deadline, SIGNAL(timeout()), this, SLOT(tileTimedOut()));
-    connect(&state_->buildingTimer, SIGNAL(timeout()), this, SLOT(loadVisibleBuildings()));
 }
 
 NodeMap::~NodeMap() {
@@ -1576,7 +1209,7 @@ void NodeMap::setSource(Source source) {
     if (s.framing != State::Manual) {
         s.fit();
     } else {
-        s.zoom = qBound(s.minimumZoom(), s.zoom, s.maximumZoom());
+        s.zoom = s.boundedZoom(s.zoom, s.center);
     }
     s.updateView();
 }
@@ -1664,9 +1297,10 @@ void NodeMap::resizeEvent(QResizeEvent* event) {
     state_->placeControls();
     if (state_->framing != State::Manual) {
         state_->fit();
+    } else {
+        state_->zoom = state_->boundedZoom(state_->zoom, state_->center);
     }
     state_->prepareAtlases();
-    state_->queueBuildings();
     state_->schedule();
 }
 
@@ -1674,9 +1308,10 @@ void NodeMap::showEvent(QShowEvent* event) {
     QWidget::showEvent(event);
     if (state_->framing != State::Manual) {
         state_->fit();
+    } else {
+        state_->zoom = state_->boundedZoom(state_->zoom, state_->center);
     }
     state_->prepareAtlases();
-    state_->queueBuildings();
     state_->schedule();
 }
 
@@ -1684,18 +1319,14 @@ void NodeMap::hideEvent(QHideEvent* event) {
     if (state_->camera.isActive()) {
         state_->center = state_->cameraTo;
         state_->center.setX(wrapped(state_->center.x()));
-        state_->zoom = state_->cameraZoom;
+        state_->zoom = state_->boundedZoom(state_->cameraZoom, state_->center);
         state_->stopCamera();
     }
     if (state_->source == Loopback) {
         state_->cancel();
         state_->stopLoopback();
     }
-    state_->buildingTimer.stop();
     state_->pinLabels.clear();
-    state_->buildingView.clear();
-    state_->buildingQueue.clear();
-    state_->buildings.releaseSectors();
     state_->settle.stop();
     state_->visibleKeys.clear();
     state_->attempted.clear();
@@ -1810,19 +1441,28 @@ void NodeMap::paintEvent(QPaintEvent*) {
     painter.setFont(font);
     painter.save();
     painter.setClipRect(map);
-    s.grid(painter, map);
-    const bool world = !complete && s.drawAtlas(painter, map, s.world, World, s.detail.bounds.isEmpty());
-    const bool detail = !complete && s.drawAtlas(painter, map, s.detail, s.detailRegion, true);
-    const bool buildings = s.drawBuildings(painter, map);
-    const bool online = s.drawTiles(painter, placements);
+    bool world = false;
+    bool detail = false;
+    if (complete) {
+        s.drawTiles(painter, placements);
+    } else {
+        // Retain one continuous basemap until the raster covers the viewport.
+        s.grid(painter, map);
+        world = s.drawAtlas(painter, map, s.world, World, s.detail.bounds.isEmpty());
+        detail = s.drawAtlas(painter, map, s.detail, s.detailRegion, true);
+    }
     s.drawPins(painter, map);
     font.setPixelSize(11);
     painter.setFont(font);
     const QFontMetrics details(font);
 
-    const QString caption = s.source == Offline && s.issue.isEmpty()
-        ? ru("Офлайн · %1").arg(regionCaption(s.region))
-        : s.status(complete);
+    QString caption = s.status(complete);
+    if (s.issue.isEmpty()) {
+        if (s.source == Offline)
+            caption = ru("Офлайн · %1").arg(regionCaption(s.region));
+        else if (!complete && (world || detail))
+            caption = ru("Офлайн · загрузка OSM");
+    }
     const int captionWidth = details.width(caption) + 2;
     const int statusWidth = qMin(field.width() - 12, captionWidth + 16);
     const QRect status(field.left() + 6, field.top() + 6, statusWidth, 22);
@@ -1838,7 +1478,7 @@ void NodeMap::paintEvent(QPaintEvent*) {
 
     // Keep every visible layer's credit above the pins and scale.
     QStringList attribution;
-    if (online || buildings || (detail && (s.detailRegion == OmskCity || s.detailRegion == OmskOblast))) {
+    if (complete || (detail && (s.detailRegion == OmskCity || s.detailRegion == OmskOblast))) {
         attribution.append(credit());
     }
     if (world || (detail && s.detailRegion == Siberia)) {
@@ -1862,9 +1502,8 @@ void NodeMap::paintEvent(QPaintEvent*) {
         painter.drawText(footer.adjusted(5, 0, -5, 0), Qt::AlignRight | Qt::AlignVCenter,
             attribution.join(QLatin1String("\n")));
     }
-    const double latitudeScale = 1.0 / std::cosh((0.5 - s.center.y()) * 2 * Pi);
-    const double metersPerPixel = 40030230.0 * latitudeScale / s.scale();
-    const double available = qMin(64, qMax(22, map.width() / 4)) * metersPerPixel;
+    const double metersPerPixel = s.worldWidthMeters(s.center) / s.scale();
+    const double available = s.scaleBarWidth() * metersPerPixel;
     double unit = 1.0;
     while (unit * 10 <= available) {
         unit *= 10;
@@ -1888,38 +1527,6 @@ void NodeMap::paintEvent(QPaintEvent*) {
         painter.drawText(hint.adjusted(6, 2, -6, -2), Qt::AlignCenter, ru("Открыть настройки карты"));
     }
     painter.restore();
-}
-
-void NodeMap::loadVisibleBuildings() {
-    State& s = *state_;
-    if (!isVisible() || s.camera.isActive() || s.source != Offline || s.zoom < BuildingZoom ||
-        s.buildingQueue.isEmpty()) {
-        return;
-    }
-    if (!s.buildings.tried()) {
-        const int sectors = s.buildings.open();
-        s.mark("map: offline building sectors indexed", sectors);
-        if (sectors == 0) {
-            s.buildingQueue.clear();
-            return;
-        }
-    }
-    int loaded = 0;
-    // A dense city view can span several sectors. Yield to input between pairs.
-    for (int i = 0; i < 2 && !s.buildingQueue.isEmpty(); ++i) {
-        const quint32 key = s.buildingQueue.first();
-        s.buildingQueue.remove(0);
-        if (s.buildings.load(key)) {
-            ++loaded;
-        }
-    }
-    if (loaded > 0) {
-        s.mark("map: offline building sectors decoded", loaded);
-        update();
-    }
-    if (!s.buildingQueue.isEmpty()) {
-        s.buildingTimer.start(0);
-    }
 }
 
 void NodeMap::loadVisibleTiles() {
@@ -1960,7 +1567,7 @@ void NodeMap::loadVisibleTiles() {
             return;
         }
         QNetworkRequest request(QUrl(s.localProxy->baseUrl() + key));
-        request.setRawHeader("User-Agent", "OMMesh-Belle-SIS/0.2.19 (+https://github.com/cm4ker/ommesh)");
+        request.setRawHeader("User-Agent", "OMMesh-Belle-SIS/0.2.24 (+https://github.com/cm4ker/ommesh)");
         request.setRawHeader("Accept", "image/png");
         request.setRawHeader("Accept-Encoding", "identity");
         const QNetworkCacheMetaData::RawHeaderList previous = saved.rawHeaders();
@@ -2176,7 +1783,7 @@ void MapSettingsPanel::selectMode(int mode) {
     validation_->hide();
     regionChoices_->setVisible(mode == NodeMap::Offline);
     instructions_->setText(mode == NodeMap::Offline
-        ? ru("Выберите начальную область. Все четыре карты работают без интернета.")
+        ? ru("Выберите начальную область. Карты работают без интернета и приближаются до 200 м.")
         : ru("Прокси localhost работает на телефоне. Для плиток OpenStreetMap допускается неизвестный центр сертификации. Нужен интернет."));
 }
 

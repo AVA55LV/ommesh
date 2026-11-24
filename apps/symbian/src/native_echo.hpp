@@ -5,6 +5,8 @@
 
 namespace meshcore {
 
+std::array<std::uint8_t, 32> sha256Digest(std::span<const std::uint8_t> bytes);
+
 struct HeardGroup {
     std::int8_t snrQuarterDb = 0;
     std::uint8_t hashWidth = 0;

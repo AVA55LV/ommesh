@@ -63,6 +63,8 @@ signals:
 
 private slots:
     void chooseEmoji();
+    void chooseAttachment();
+    void insertAttachment(const QString& link);
     void removeQuote();
     void updateComposer();
     void send();
@@ -94,6 +96,7 @@ private:
     QTextEdit* quoteText_;
     QTextEdit* composer_;
     QPushButton* emojiButton_;
+    QPushButton* attachmentButton_;
     QPushButton* sendButton_;
     QString activeId_;
     QVector<ChatMessage> messages_;

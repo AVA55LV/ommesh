@@ -220,6 +220,10 @@ std::optional<SelfInfo> parseSelf(std::span<const std::uint8_t> payload)
     result.maxPowerDbm = static_cast<std::int8_t>(payload[3]);
     result.latitude = static_cast<std::int32_t>(readU32(payload, 36));
     result.longitude = static_cast<std::int32_t>(readU32(payload, 40));
+    result.multiAcks = payload[44];
+    result.advertLocPolicy = payload[45];
+    result.telemetryModes = payload[46];
+    result.manualAddContacts = payload[47];
     result.frequencyKhz = readU32(payload, 48);
     result.bandwidthHz = readU32(payload, 52);
     result.spreadingFactor = payload[56];
@@ -236,6 +240,7 @@ std::optional<Contact> parseContact(std::span<const std::uint8_t> payload)
     Contact result;
     std::copy_n(payload.begin() + 1, result.key.size(), result.key.begin());
     result.type = payload[33];
+    result.flags = payload[34];
     result.name = readText(payload.subspan(100, 32));
     result.path = payload[35];
     std::copy_n(payload.begin() + 36, result.pathHashes.size(), result.pathHashes.begin());

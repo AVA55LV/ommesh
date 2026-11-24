@@ -199,7 +199,8 @@ QString label(Field field, const QString& target, bool room) {
 }
 
 bool choose(Field field, const QString& target, bool room, QWidget* parent) {
-    if (target.isEmpty())
+    const bool global = target.isEmpty();
+    if (global && field == Notifications)
         return false;
     QSettings settings;
     QDialog dialog(parent);
@@ -209,9 +210,10 @@ bool choose(Field field, const QString& target, bool room, QWidget* parent) {
     auto* list = new QListWidget(&dialog);
     list->setObjectName(QLatin1String("nodeChatOptionList"));
     list->setProperty("accessibleName", dialog.windowTitle());
-    const int active = selected(settings, field, target, room);
+    const int active = global ? fallback(settings, field, target) : selected(settings, field, target, room);
     QVector<int> values;
-    values << Inherited;
+    if (!global)
+        values << Inherited;
     if (field == Notifications) {
         values << All;
         if (room)
@@ -244,7 +246,8 @@ bool choose(Field field, const QString& target, bool room, QWidget* parent) {
     if (dialog.exec() != QDialog::Accepted || !list->currentItem())
         return false;
     const int option = list->currentItem()->data(Qt::UserRole).toInt();
-    const QString key = storageKey(field, target);
+    const QString key = global ? QLatin1String(field == Sound ? "ui/notificationSound" : "ui/chatBackground") :
+                                 storageKey(field, target);
     if (option == Inherited)
         settings.remove(key);
     else
@@ -253,6 +256,14 @@ bool choose(Field field, const QString& target, bool room, QWidget* parent) {
     if (field == Sound)
         playNotification(settings, target);
     return option != active;
+}
+
+QString defaultLabel(Field field) {
+    return description(field, fallback(QSettings(), field, QString()), false);
+}
+
+bool chooseDefault(Field field, QWidget* parent) {
+    return choose(field, QString(), false, parent);
 }
 
 bool allowsNotification(const QSettings& settings, const QString& target, bool room,

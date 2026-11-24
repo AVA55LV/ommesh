@@ -9,6 +9,7 @@
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QMap>
 #include <QtCore/QObject>
+#include <QtCore/QSet>
 #include <QtCore/QString>
 #include <QtCore/QStringList>
 #include <QtCore/QVector>
@@ -69,6 +70,26 @@ struct RadioChannel {
     QString key;
 };
 
+struct RadioBackupSnapshot {
+    QString publicKey;
+    meshcore::SelfInfo identity;
+    QVector<RadioChannel> channels;
+    std::vector<meshcore::Contact> contacts;
+    std::optional<bool> repeatEnabled;
+    int pathHashMode = -1;
+    int maxChannels = -1;
+    int maxContacts = -1;
+};
+
+struct RadioBackupRestore {
+    QString expectedTarget;
+    QString sourcePublicKey;
+    QByteArray privateKey;
+    std::vector<meshcore::Bytes> settings;
+    QVector<RadioChannel> channels;
+    std::vector<meshcore::Contact> contacts;
+};
+
 struct NodeNeighbour {
     QString prefix;
     quint32 heardSeconds;
@@ -90,6 +111,16 @@ struct NodeTelemetryReadings {
     std::optional<int> temperatureTenthsC;
 };
 
+struct RadioReadings {
+    std::optional<int> batteryMillivolts;
+    std::optional<int> noiseDbm;
+    std::optional<int> temperatureTenthsC;
+    std::optional<quint32> uptimeSeconds;
+    quint32 transmitSeconds = 0;
+    quint32 receiveSeconds = 0;
+    quint32 capturedAt = 0;
+};
+
 struct NodeRouteTraceResult {
     int roundTripMs;
     QVector<int> snrQuarters;
@@ -99,6 +130,8 @@ class Client : public QObject {
     Q_OBJECT
 
 public:
+    enum BackupKeyResult { BackupKeyRead, BackupKeyUnavailable, BackupKeyFailed };
+
     enum NodeOperation {
         NodeNeighbours = meshcore::RadioConsole::Neighbours,
         NodeAccess = meshcore::RadioConsole::Access,
@@ -139,6 +172,16 @@ public:
     void unblockChannelName(const QString& name);
     bool advertise();
     bool requestBattery();
+    bool requestRadioReadings();
+    bool applyRadioSettings(int requestId, const std::vector<meshcore::Bytes>& commands,
+                            bool readBackIdentity = true);
+    bool restartRadio(bool factoryReset);
+    QString localHistoryRadioKey() const;
+    bool canEraseLocalHistory() const;
+    bool eraseLocalHistory(const QString& expectedRadioKey);
+    void reloadStoredHistory();
+    bool setTrustedContact(int requestId, const QString& publicKey, bool enabled);
+    QSet<QString> trustedContactKeys() const;
     int nextConsoleRequestId();
     bool runConsole(int requestId, const QString& nodeId, const QString& command);
     bool loginConsole(int requestId, const QString& nodeId, const QString& password);
@@ -157,6 +200,12 @@ public:
     static std::optional<NodeRouteTraceResult> parseNodeRouteTrace(const QByteArray& data);
     QVector<RadioChannel> radioChannels() const;
     bool setRadioChannel(int slot, const QString& name, const QString& keyHex);
+    std::optional<RadioBackupSnapshot> radioBackupSnapshot() const;
+    int radioBackupMessageCount() const;
+    bool requestRadioBackupKey(int requestId, const QString& expectedTarget);
+    bool restoreRadioBackup(int requestId, const RadioBackupRestore& copy);
+    bool canLoadRadioBackupHistory(const QString& key) const;
+    bool reloadRadioBackupHistory(const QString& key);
 
     bool connected() const;
     bool connecting() const;
@@ -169,6 +218,12 @@ public:
     QString radioInfo() const;
     QString radioParameters() const;
     QString radioParametersSummary() const;
+    const meshcore::SelfInfo& radioIdentity() const;
+    int radioProtocolVersion() const;
+    std::optional<bool> radioRepeatEnabled() const;
+    int radioPathHashMode() const;
+    const RadioReadings& radioReadings() const;
+    bool radioReadingsPending() const;
     QString batteryInfo() const;
     int batteryMillivolts() const;
     int lastBatteryMillivolts() const;
@@ -183,11 +238,16 @@ public:
 
 signals:
     void changed();
+    void radioPacketReceived(int snrQuarterDb, int rssiDbm, int type, int hops, int bytes, int routeType);
     void incomingMessage();
     void incomingChatMessage(const QString& id, const QString& text, bool room);
     void consoleResult(int requestId, int operation, bool success, const QString& text);
     void nodeManagementResult(int requestId, int operation, bool success, const QByteArray& data, const QString& error);
     void channelResult(int slot, bool success, const QString& message);
+    void radioSettingsResult(int requestId, bool success, const QString& status);
+    void radioBackupKeyResult(int requestId, int result, const QByteArray& key, const QString& text);
+    void radioBackupProgress(int requestId, const QString& stage, int done, int total);
+    void radioBackupRestored(int requestId, bool success, const QString& confirmedPublicKey, const QString& text);
 
 private slots:
     void socketConnected();
@@ -200,7 +260,32 @@ private slots:
     void tick();
 
 private:
-    enum class Wait { None, Device, Identity, Contacts, Channel, Sync, Send, ResetPath, Advert, Battery, Console, SetChannel, Reaction };
+    enum class Wait { None, Device, Identity, Contacts, Channel, Sync, Send, ResetPath, Advert, Battery,
+                      Console, SetChannel, Reaction, RadioStats, OwnTelemetry, RadioSetting,
+                      RadioSettingIdentity, RestartRadio, RadioBackupKey, RadioBackupWrite, RadioBackupReboot };
+    struct RadioBackupTransaction {
+        int id = 0;
+        QString target;
+        QString source;
+        QString host;
+        quint16 port = 0;
+        std::vector<meshcore::Bytes> writes;
+        QByteArray key;
+        std::size_t acknowledged = 0;
+        bool keyAccepted = false;
+        bool verifying = false;
+        qint64 reconnectUntil = 0;
+        QString failure;
+        QString skipped;
+    };
+    struct RadioSettingsTransaction {
+        int id;
+        std::vector<meshcore::Bytes> commands;
+        bool readBackIdentity;
+        std::size_t acknowledged = 0;
+        bool refreshContacts = false;
+        QString error;
+    };
     struct ReactionEntry {
         QString emoji;
         QString actor;
@@ -256,6 +341,15 @@ private:
 
     QString targetTitle(const QString& id) const;
     bool write(const meshcore::Bytes& body, Wait wait);
+    void updateRadioIdentity(const meshcore::SelfInfo& identity);
+    void completeRadioSetting(bool success, const QString& text);
+    void readRadioSettingsReply(const meshcore::Bytes& frame);
+    bool sameRadioBackupEndpoint() const;
+    bool advanceRadioBackup();
+    void readRadioBackupReply(const meshcore::Bytes& frame);
+    void completeRadioBackupKey(int result, const QByteArray& key, const QString& text);
+    void completeRadioBackup(const QString& confirmedPublicKey, const QString& error = {});
+    void advanceRadioReadings();
     void frameReceived(const meshcore::Bytes& frame);
     void openLink(bool retrying);
     void loadNextChannel();
@@ -302,7 +396,7 @@ private:
     void deferSocketFailure(const QString& status, bool retryable = false);
     void finish(const QString& status, bool retryable = false);
     void addMessage(const QString& target, const ChatMessage& message,
-                    quint32 tag = 0, qint64 deadline = 0);
+                    quint32 tag = 0, qint64 deadline = 0, bool flood = true);
     void invalidatePending();
     void loadHistory();
     void saveHistory();
@@ -339,6 +433,20 @@ private:
     bool currentManualSync_ = false;
     bool advertNeeded_ = false;
     bool batteryNeeded_ = false;
+    int radioReadingsStage_ = -1;
+    int radioProtocolVersion_ = 0;
+    std::optional<bool> radioRepeatEnabled_;
+    bool radioPathHashModeKnown_ = false;
+    RadioReadings radioReadings_;
+    RadioReadings nextRadioReadings_;
+    std::optional<RadioSettingsTransaction> radioSettingsTransaction_;
+    std::optional<RadioBackupTransaction> radioBackupTransaction_;
+    int radioBackupKeyRequest_ = 0;
+    QString radioBackupKeyTarget_;
+    bool radioContactsComplete_ = false;
+    bool radioContactsOverflow_ = false;
+    bool radioChannelsComplete_ = false;
+    int radioMaxContacts_ = -1;
     bool closing_ = false;
     bool logFirstReply_ = false;
     QString pendingSocketFailure_;
@@ -389,6 +497,7 @@ private:
     std::optional<PendingReaction> reactionRequest_;
     QString pendingId_;
     ChatMessage pendingMessage_;
+    int pendingHistoryPosition_ = 0;
     meshcore::Key pendingKey_{};
     meshcore::Bytes pendingEcho_;
     qint64 pendingEchoFrom_ = 0;

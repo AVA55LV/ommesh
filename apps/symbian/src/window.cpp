@@ -10,6 +10,7 @@
 #include "settings_icons.hpp"
 
 #include <QtCore/QBasicTimer>
+#include <QtCore/QChildEvent>
 #include <QtCore/QDateTime>
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QEvent>
@@ -324,14 +325,16 @@ public:
     void setContent(QWidget* content) {
         setWidget(content);
         viewport()->installEventFilter(this);
-        content->installEventFilter(this);
-        const QList<QWidget*> children = content->findChildren<QWidget*>();
-        for (QWidget* child : children)
-            child->installEventFilter(this);
+        watch(content);
     }
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override {
+        if (event->type() == QEvent::ChildPolished) {
+            auto* child = qobject_cast<QWidget*>(static_cast<QChildEvent*>(event)->child());
+            if (child && !child->isWindow())
+                watch(child);
+        }
         if (event->type() != QEvent::MouseButtonPress && event->type() != QEvent::MouseMove &&
                 event->type() != QEvent::MouseButtonRelease)
             return QScrollArea::eventFilter(watched, event);
@@ -344,7 +347,7 @@ protected:
             button_ = qobject_cast<QAbstractButton*>(watched);
         } else if (event->type() == QEvent::MouseMove && pressed_ && (mouse->buttons() & Qt::LeftButton)) {
             const QPoint offset = mouse->globalPos() - start_;
-            if (qAbs(offset.y()) > 8 && qAbs(offset.y()) > qAbs(offset.x()))
+            if (verticalScrollBar()->maximum() > 0 && qAbs(offset.y()) > 8 && qAbs(offset.y()) > qAbs(offset.x()))
                 dragging_ = true;
             if (dragging_) {
                 if (button_)
@@ -363,6 +366,14 @@ protected:
     }
 
 private:
+    void watch(QWidget* content) {
+        content->installEventFilter(this);
+        const auto descendants = content->findChildren<QWidget*>();
+        for (QWidget* child : descendants)
+            if (!child->isWindow() && child->window() == content->window())
+                child->installEventFilter(this);
+    }
+
     QPointer<QAbstractButton> button_;
     QPoint start_;
     int scroll_ = 0;
@@ -662,6 +673,10 @@ QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content) {
     return scroll;
 }
 
+QListWidget* makeTouchList(QWidget* parent) {
+    return new TouchList(parent);
+}
+
 namespace {
 
 class PanelMotion {
@@ -708,6 +723,63 @@ private:
 
 }  // namespace
 
+class PageTransition : public QWidget {
+public:
+    explicit PageTransition(QStackedWidget* stack) : QWidget(stack) {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
+        hide();
+    }
+
+    QPixmap capture() {
+        stop();
+        QWidget* stack = parentWidget();
+        if (!stack->isVisible() || stack->width() < 2 || stack->height() < 2)
+            return QPixmap();
+        return QPixmap::grabWidget(stack, stack->rect());
+    }
+
+    void reveal(const QPixmap& previous, int direction) {
+        if (previous.isNull())
+            return;
+        previous_ = previous;
+        direction_ = direction;
+        setGeometry(parentWidget()->rect());
+        motion_.moveTo(0, this, 0);
+        motion_.moveTo(1, this, 145);
+        show();
+        raise();
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        const qreal progress = motion_.value();
+        painter.setOpacity(qMax(qreal(0), 1 - progress));
+        painter.drawPixmap(qRound(-direction_ * 18 * progress), 0, previous_);
+    }
+
+    void timerEvent(QTimerEvent* event) override {
+        if (!motion_.step(event))
+            return;
+        if (motion_.inMotion())
+            update();
+        else
+            stop();
+    }
+
+private:
+    void stop() {
+        motion_.moveTo(1, this, 0);
+        hide();
+        previous_ = QPixmap();
+    }
+
+    PanelMotion motion_{1};
+    QPixmap previous_;
+    int direction_ = 1;
+};
+
 class AnimatedTabStrip : public QWidget {
 public:
     explicit AnimatedTabStrip(QWidget* parent) : QWidget(parent), bar_(new QWidget(this)) {
@@ -753,7 +825,13 @@ public:
     explicit NetworkDashboard(QWidget* parent) : QWidget(parent) {
         setObjectName(QLatin1String("networkPage"));
         setAttribute(Qt::WA_StyledBackground);
+        listButton_ = button(ui("К списку"), this);
+        listButton_->setObjectName(QLatin1String("networkReturnToList"));
+        listButton_->setMinimumSize(96, 38);
+        listButton_->hide();
     }
+
+    QPushButton* listButton() const { return listButton_; }
 
     void setContent(NodeMap* map, QWidget* panel) {
         map_ = map;
@@ -798,10 +876,15 @@ private:
             map_->setGeometry(0, 0, width(), height() - visible);
             panel_->setGeometry(0, height() - visible, width(), panelSize);
         }
+        listButton_->setGeometry(8, 30, 108, 39);
+        listButton_->setVisible(expanded_);
+        if (expanded_)
+            listButton_->raise();
     }
 
     NodeMap* map_ = nullptr;
     QWidget* panel_ = nullptr;
+    QPushButton* listButton_ = nullptr;
     bool expanded_ = false;
     PanelMotion motion_{0};
 };
@@ -809,8 +892,9 @@ private:
 class NetworkSheet : public QWidget {
 public:
     NetworkSheet(QWidget* owner, QWidget* content, const QString& title,
-                 const std::function<void()>& close)
-        : QWidget(owner), card_(surface(this, "networkSheet")), close_(close) {
+                 bool fullHeight, const std::function<void()>& close)
+        : QWidget(owner), card_(surface(this, "networkSheet")), close_(close),
+          fullHeight_(fullHeight || title.isEmpty()) {
         setObjectName(QLatin1String("networkOverlay"));
         auto* layout = new QVBoxLayout(card_);
         layout->setContentsMargins(12, 7, 12, 10);
@@ -820,10 +904,9 @@ public:
         grip->setAttribute(Qt::WA_TransparentForMouseEvents);
         layout->addWidget(grip, 0, Qt::AlignHCenter);
         auto* heading = new QHBoxLayout;
-        fullHeight_ = title.isEmpty();
-        closeButton_ = button(fullHeight_ ? QString() : ui("Готово"), card_);
+        closeButton_ = button(title.isEmpty() ? QString() : ui("Готово"), card_);
         closeButton_->setObjectName(QLatin1String("networkSheetClose"));
-        if (fullHeight_) {
+        if (title.isEmpty()) {
             heading->addStretch(1);
             const Appearance::Palette colors = Appearance::paletteFor(owner);
             closeButton_->setFixedSize(31, 30);
@@ -865,6 +948,7 @@ public:
     QPushButton* closeButton() const { return closeButton_; }
 
     void dismiss(bool animate) {
+        setAttribute(Qt::WA_TransparentForMouseEvents);
         if (!animate) {
             hide();
             deleteLater();
@@ -1016,6 +1100,7 @@ ClientWindow::ClientWindow(Client& client, QWidget* parent)
     connectionPage_ = makeConnectionPage();
     pages_->addWidget(dashboard_);
     pages_->addWidget(connectionPage_);
+    pageTransition_ = new PageTransition(pages_);
     layout->addWidget(pages_, 1);
     layout->addWidget(makeTabs());
 
@@ -1176,6 +1261,7 @@ QWidget* ClientWindow::makeNetworkPage() {
     networkPage_->setContent(map_, listPage);
 
     connect(map_, SIGNAL(expansionRequested()), this, SLOT(showMap()));
+    connect(networkPage_->listButton(), SIGNAL(clicked()), this, SLOT(showMap()), Qt::QueuedConnection);
     connect(nodeFiltersButton_, SIGNAL(clicked()), this, SLOT(openNetworkFilters()), Qt::QueuedConnection);
     connect(nodeSearch_, SIGNAL(textChanged(QString)), this, SLOT(filterNodes()));
     connect(nodes_, SIGNAL(itemClicked(QListWidgetItem*)), this, SLOT(openNode(QListWidgetItem*)));
@@ -1291,6 +1377,8 @@ QWidget* ClientWindow::makeSettingsPage() {
     connect(settingsSearch_, SIGNAL(textChanged(QString)), this, SLOT(filterSettings(QString)));
     connect(radioSettings_, SIGNAL(detailRequested(QWidget*,QString)),
             this, SLOT(showDetailPage(QWidget*,QString)));
+    connect(radioSettings_, SIGNAL(detailCloseRequested(QWidget*)),
+            this, SLOT(closeDetailPage(QWidget*)));
     connect(radioSettings_, SIGNAL(mapSettingsRequested()), this, SLOT(openMapSettings()));
     connect(radioSettings_, SIGNAL(appearanceChanged(int,int)), this, SLOT(applyAppearance(int,int)));
     return page;
@@ -1362,12 +1450,23 @@ QWidget* ClientWindow::makeConnectionPage() {
 void ClientWindow::selectTab(int tab) {
     if (tab < Chats || tab > Settings)
         return;
+    if (tab == Network && tab_ == Network && pages_->currentWidget() == dashboard_ &&
+            !networkSheet_ && networkPage_->expanded()) {
+        networkPage_->setExpanded(false);
+        return;
+    }
     pendingTab_ = tab;
     queueNavigation(Navigation::Tab);
 }
 
 void ClientWindow::returnToDashboard() {
-    queueNavigation(Navigation::Dashboard);
+    queueNavigation(pages_->currentWidget() == detailPage_ && !detailHistory_.isEmpty() ?
+                    Navigation::DetailBack : Navigation::Dashboard);
+}
+
+void ClientWindow::closeDetailPage(QWidget* page) {
+    if (page && detailContent_.data() == page && pages_->currentWidget() == detailPage_)
+        returnToDashboard();
 }
 
 void ClientWindow::showChats() {
@@ -1421,8 +1520,6 @@ void ClientWindow::applyNavigation() {
     pendingNavigation_ = Navigation::None;
     if (action == Navigation::None)
         return;
-    if (action == Navigation::Map && (tab_ != Network || pages_->currentWidget() != dashboard_))
-        return;
     if (action == Navigation::Detail && !pendingDetail_)
         return;
 
@@ -1446,7 +1543,16 @@ void ClientWindow::applyNavigation() {
         return;
     }
 
-    const bool leavingDetail = pages_->currentWidget() == detailPage_ && action != Navigation::Detail;
+    const bool back = action == Navigation::DetailBack ||
+                      (action == Navigation::MapSaved && !detailHistory_.isEmpty());
+    const bool towardDetail = action == Navigation::Detail || back;
+    const bool leavingDetail = pages_->currentWidget() == detailPage_ && !towardDetail;
+    QWidget* targetPage = action == Navigation::Connection ? connectionPage_ : dashboard_;
+    const bool animate = towardDetail || targetPage != pages_->currentWidget() ||
+                         (action == Navigation::Tab && pendingTab_ != tab_);
+    const int direction = action == Navigation::Tab && pendingTab_ != tab_ ? (pendingTab_ > tab_ ? 1 : -1) :
+                          action == Navigation::Detail || action == Navigation::Connection ? 1 : -1;
+    const QPixmap previous = animate ? pageTransition_->capture() : QPixmap();
     if (pages_->currentWidget() == chatPage_)
         saveDraft();
     if (action == Navigation::Tab) {
@@ -1457,27 +1563,33 @@ void ClientWindow::applyNavigation() {
         tabs_->button(Settings)->setIcon(tabIcon(Appearance::paletteFor(this), Settings, 0, tab_ == Settings));
         tabPages_->setCurrentIndex(tab_);
         tabStrip_->select(tab_, true);
-    } else if (action == Navigation::Map) {
-        networkPage_->setExpanded(!networkPage_->expanded());
     } else if (action == Navigation::MapSaved) {
         configureNodeMap(map_);
         radioSettings_->updateStatus();
     }
 
-    if (action == Navigation::Detail)
-        showPendingDetail();
+    if (towardDetail)
+        showPendingDetail(back);
     else
-        pages_->setCurrentWidget(action == Navigation::Connection ? connectionPage_ : dashboard_);
+        pages_->setCurrentWidget(targetPage);
     if (leavingDetail)
         clearDetail();
     client_.traceConnection("ui navigation page shown");
     updateView();
+    pageTransition_->reveal(previous, direction);
     client_.traceConnection("ui navigation end");
 }
 
-void ClientWindow::showPendingDetail() {
-    QWidget* content = pendingDetail_.data();
-    pendingDetail_ = nullptr;
+void ClientWindow::showPendingDetail(bool back) {
+    if (back && detailHistory_.isEmpty())
+        return;
+    const DetailEntry entry = back ? detailHistory_.last() :
+                              DetailEntry{pendingDetail_, pendingDetailTitle_};
+    if (back)
+        detailHistory_.remove(detailHistory_.size() - 1);
+    else
+        pendingDetail_ = nullptr;
+    QWidget* content = entry.content.data();
     if (!content)
         return;
     if (!detailPage_) {
@@ -1499,22 +1611,38 @@ void ClientWindow::showPendingDetail() {
         connect(detailBack_, SIGNAL(clicked()), this, SLOT(returnToDashboard()));
     }
     if (detailContent_.data() != content) {
-        clearDetail();
+        QWidget* previous = takeDetail();
+        if (previous) {
+            if (back)
+                previous->deleteLater();
+            else
+                detailHistory_.append(DetailEntry{previous, detailTitle_->text()});
+        }
         detailContent_ = content;
         detailLayout_->addWidget(content, 1);
         content->show();
     }
-    detailTitle_->setText(pendingDetailTitle_);
+    detailTitle_->setText(entry.title);
     pages_->setCurrentWidget(detailPage_);
 }
 
-void ClientWindow::clearDetail() {
-    if (detailContent_) {
-        detailLayout_->removeWidget(detailContent_.data());
-        detailContent_->hide();
-        detailContent_->deleteLater();
-        detailContent_ = nullptr;
+QWidget* ClientWindow::takeDetail() {
+    QWidget* content = detailContent_.data();
+    if (content) {
+        detailLayout_->removeWidget(content);
+        content->hide();
     }
+    detailContent_ = nullptr;
+    return content;
+}
+
+void ClientWindow::clearDetail() {
+    if (QWidget* content = takeDetail())
+        content->deleteLater();
+    for (const DetailEntry& entry : detailHistory_)
+        if (entry.content)
+            entry.content->deleteLater();
+    detailHistory_.clear();
 }
 
 void ClientWindow::openNewChat() {
@@ -1741,6 +1869,7 @@ void ClientWindow::openPendingTarget() {
         }
         if (pages_->currentWidget() == chatPage_)
             saveDraft();
+        const QPixmap previous = pageTransition_->capture();
         activeId_ = id;
         activeTitle_ = target.title;
         client_.traceConnection("ui chat context begin");
@@ -1755,6 +1884,7 @@ void ClientWindow::openPendingTarget() {
         chatPage_->setMessages(client_.messages(activeId_), true);
         client_.markRead(activeId_);
         updateView();
+        pageTransition_->reveal(previous, 1);
         client_.traceConnection("ui chat open end");
         return;
     }
@@ -1825,7 +1955,7 @@ void ClientWindow::openNetworkManagement(const QString& id, int page) {
     networkParentNodeId_ = id;
     auto* panel = new Panel(client_, node, static_cast<Panel::Page>(page), networkPage_);
     connect(panel, SIGNAL(openNode(QString)), this, SLOT(openNetworkNeighbour(QString)), Qt::QueuedConnection);
-    showNetworkSheet(panel, title);
+    showNetworkSheet(panel, title, true);
 }
 
 void ClientWindow::openNetworkNeighbour(const QString& id) {
@@ -1835,9 +1965,10 @@ void ClientWindow::openNetworkNeighbour(const QString& id) {
     openNode(id);
 }
 
-void ClientWindow::showNetworkSheet(QWidget* content, const QString& title) {
+void ClientWindow::showNetworkSheet(QWidget* content, const QString& title, bool fullHeight) {
     focusNavigation(Network);
-    networkSheet_ = new NetworkSheet(networkPage_, content, title, [this] { closeNetworkSheet(); });
+    networkSheet_ = new NetworkSheet(networkPage_, content, title, fullHeight,
+                                     [this] { closeNetworkSheet(); });
     connect(networkSheet_->closeButton(), SIGNAL(clicked()), this, SLOT(closeNetworkSheet()),
             Qt::QueuedConnection);
 }
@@ -1897,7 +2028,8 @@ void ClientWindow::centerNetworkNode(const QString& id) {
 }
 
 void ClientWindow::showMap() {
-    queueNavigation(Navigation::Map);
+    if (tab_ == Network && pages_->currentWidget() == dashboard_ && !networkSheet_)
+        networkPage_->setExpanded(!networkPage_->expanded());
 }
 
 void ClientWindow::openMapSettings() {
@@ -2096,7 +2228,9 @@ void ClientWindow::updateView() {
     if (connected && !wasConnected_ && pages_->currentWidget() == connectionPage_) {
         client_.traceConnection("ui show dashboard begin");
         focusNavigation(tab_);
+        const QPixmap previous = pageTransition_->capture();
         pages_->setCurrentWidget(dashboard_);
+        pageTransition_->reveal(previous, -1);
         client_.traceConnection("ui show dashboard end");
     }
     wasConnected_ = connected;

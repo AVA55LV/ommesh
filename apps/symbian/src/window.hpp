@@ -15,6 +15,7 @@ class ChatView;
 class AnimatedTabStrip;
 class NetworkDashboard;
 class NetworkSheet;
+class PageTransition;
 class NodeMap;
 class RadioSettingsPanel;
 class QAction;
@@ -30,6 +31,7 @@ class QToolButton;
 class QVBoxLayout;
 
 QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content);
+QListWidget* makeTouchList(QWidget* parent);
 
 class ClientWindow : public QWidget {
     Q_OBJECT
@@ -48,6 +50,7 @@ private slots:
     void selectTab(int tab);
     void openConnection();
     void returnToDashboard();
+    void closeDetailPage(QWidget* page);
     void showChats();
     void applyNavigation();
     void exitApplication();
@@ -96,7 +99,8 @@ private slots:
 private:
     enum Tab { Chats, Network, Settings };
     enum class ConnectionRequest { None, Connect, Disconnect };
-    enum class Navigation { None, Tab, Dashboard, Connection, Detail, Map, MapSettings, MapSaved, Exit, NewChat };
+    enum class Navigation { None, Tab, Dashboard, Connection, Detail, DetailBack, MapSettings, MapSaved, Exit, NewChat };
+    struct DetailEntry { QPointer<QWidget> content; QString title; };
 
     QWidget* makeDashboard();
     QWidget* makeTabs();
@@ -106,14 +110,15 @@ private:
     QWidget* makeConnectionPage();
     void queueNavigation(Navigation action);
     void focusNavigation(int tab);
-    void showPendingDetail();
+    void showPendingDetail(bool back);
+    QWidget* takeDetail();
     void clearDetail();
     void makeChatChooser();
     void updateChatChooser(const QVector<ChatTarget>& targets);
     void showTargets(const QVector<ChatTarget>& targets);
     void showNodes(const QVector<NetworkNode>& nodes);
     void updateNetworkFilterIcon();
-    void showNetworkSheet(QWidget* content, const QString& title);
+    void showNetworkSheet(QWidget* content, const QString& title, bool fullHeight = false);
     void dismissNetworkSheet(bool animate);
     NetworkNode findNetworkNode(const QString& id) const;
     void showMessages(const QVector<ChatTarget>& targets);
@@ -123,6 +128,7 @@ private:
 
     Client& client_;
     QStackedWidget* pages_ = nullptr;
+    PageTransition* pageTransition_ = nullptr;
     QWidget* dashboard_ = nullptr;
     QStackedWidget* tabPages_ = nullptr;
     QWidget* connectionPage_ = nullptr;
@@ -132,6 +138,7 @@ private:
     QLabel* detailTitle_ = nullptr;
     QPointer<QWidget> detailContent_;
     QPointer<QWidget> pendingDetail_;
+    QVector<DetailEntry> detailHistory_;
     QButtonGroup* tabs_ = nullptr;
     QToolButton* chatsTab_ = nullptr;
     AnimatedTabStrip* tabStrip_ = nullptr;

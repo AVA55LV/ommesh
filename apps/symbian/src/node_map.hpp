@@ -54,7 +54,6 @@ private slots:
     void activateControl(int control);
     void advanceCamera();
     void loadVisibleTiles();
-    void loadVisibleBuildings();
     void readTileData();
     void finishCurrentReply();
     void finishTile();

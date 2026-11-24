@@ -216,6 +216,10 @@ void encryptBlocks(std::span<const std::uint8_t, AesBlockSize> key, std::span<st
 
 }  // namespace
 
+std::array<std::uint8_t, 32> sha256Digest(std::span<const std::uint8_t> bytes) {
+    return sha256(bytes);
+}
+
 std::array<std::uint8_t, 16> hashtagChannelKey(std::string_view name) {
     const auto digest = sha256({reinterpret_cast<const std::uint8_t*>(name.data()), name.size()});
     std::array<std::uint8_t, 16> key{};
