@@ -84,6 +84,7 @@ private slots:
     void showChatOptions(const QPoint& position);
     void closeChatOptions();
     void applyChatOption();
+    void applyChatErase();
     void toggleActivePin();
     void manageSettingsConnection();
     void retrySettingsConnection();

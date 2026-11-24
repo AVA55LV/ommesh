@@ -77,6 +77,7 @@ symbian_add_executable(ommesh_belle SOURCES
   src/native_vibration.cpp
   src/native_wlan.cpp
   src/native_location.cpp
+  src/native_keyboard.cpp
   src/phone_location.cpp
   src/native_tile_https.cpp
   src/native_allocator.cpp
@@ -135,9 +136,11 @@ target_link_libraries(ommesh_belle PRIVATE
   Symbian::Vibra
   "${SYMBIAN_SDK_PREFIX}/proxies/efsrv/efsrv.dso"
   "${SYMBIAN_SDK_PREFIX}/proxies/lbs/lbs.dso"
+  "${SYMBIAN_SDK_PREFIX}/proxies/cone/cone.dso"
+  "${SYMBIAN_SDK_PREFIX}/proxies/eikcore/eikcore.dso"
 )
 
-symbian_enable_native_leaves(ommesh_belle SOURCES src/main.cpp src/native_vibration.cpp src/native_location.cpp)
+symbian_enable_native_leaves(ommesh_belle SOURCES src/main.cpp src/native_vibration.cpp src/native_location.cpp src/native_keyboard.cpp)
 set_property(SOURCE src/main.cpp src/native_vibration.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-pic -fno-pie)
 
 # Immutable PIC vtables contain loader imports. Put them in the code image

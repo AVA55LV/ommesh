@@ -1,6 +1,7 @@
 #include "chat_features.hpp"
 #include "link_preview.hpp"
 #include "message_text.hpp"
+#include "native_keyboard.hpp"
 #include "node_chat_options.hpp"
 #include "settings_attachments.hpp"
 #include "settings_icons.hpp"
@@ -81,6 +82,8 @@ const int relayBadgeLimit = 20;
 const int receiptTextSize = 14;
 const int reactionTextSize = 13;
 const int reactionBadgePadding = 4;
+const int chatBottomMargin = 6;
+const int keyboardWatchMs = 150;
 
 enum ReceiptKind { NoReceipt, SendingReceipt, WaitingReceipt, AcceptedReceipt, ConfirmedReceipt };
 
@@ -1479,7 +1482,7 @@ ChatView::ChatView(QWidget* parent)
     setAttribute(Qt::WA_StyledBackground);
 
     QVBoxLayout* page = new QVBoxLayout(this);
-    page->setContentsMargins(8, 5, 8, 6);
+    page->setContentsMargins(8, 5, 8, chatBottomMargin);
     page->setSpacing(5);
     QHBoxLayout* top = new QHBoxLayout;
     top->setSpacing(7);
@@ -1572,6 +1575,7 @@ ChatView::ChatView(QWidget* parent)
     composer_->setAcceptRichText(false);
     composer_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     composer_->setFixedHeight(59);
+    keyboardWatch_ = new QTimer(this);
     emojiButton_ = makeButton(QString(), this, "emojiButton");
     emojiButton_->setProperty("accessibleName", ui("Смайлики"));
     emojiButton_->setToolTip(ui("Смайлики"));
@@ -1601,10 +1605,32 @@ ChatView::ChatView(QWidget* parent)
     connect(emojiButton_, SIGNAL(clicked()), this, SLOT(chooseEmoji()));
     connect(attachmentButton_, SIGNAL(clicked()), this, SLOT(chooseAttachment()), Qt::QueuedConnection);
     connect(composer_, SIGNAL(textChanged()), this, SLOT(updateComposer()));
+    connect(qApp, SIGNAL(focusChanged(QWidget*,QWidget*)), this, SLOT(composerFocusChanged(QWidget*,QWidget*)));
+    connect(keyboardWatch_, SIGNAL(timeout()), this, SLOT(updateKeyboardInset()));
     connect(sendButton_, SIGNAL(clicked()), this, SLOT(send()));
     const Appearance::Preferences appearance = Appearance::preferences();
     setAppearance(Appearance::palette(appearance.theme), appearance.chatTextSize);
     updateComposer();
+}
+
+void ChatView::composerFocusChanged(QWidget* previous, QWidget* focus) {
+    if (previous != composer_ && focus != composer_)
+        return;
+    const bool split = focus == composer_ && !NativeKeyboard::fullScreenPreferred();
+    if (NativeKeyboard::setSplitMode(focus, split))
+        keyboardWatch_->start(keyboardWatchMs);
+    else
+        keyboardWatch_->stop();
+    updateKeyboardInset();
+}
+
+void ChatView::updateKeyboardInset() {
+    const int visibleBottom = keyboardWatch_->isActive() && isVisible() ? NativeKeyboard::splitViewBottom() : -1;
+    int bottom = chatBottomMargin;
+    if (visibleBottom >= 0)
+        bottom += qMax(0, mapToGlobal(QPoint(0, height())).y() - visibleBottom);
+    if (layout()->contentsMargins().bottom() != bottom)
+        layout()->setContentsMargins(8, 5, 8, bottom);
 }
 
 void ChatView::syncLinkPreviewMode() {

@@ -5,6 +5,7 @@
 #include "client.hpp"
 #include "demo_radio.hpp"
 #include "native_echo.hpp"
+#include "native_keyboard.hpp"
 #include "native_vibration.hpp"
 #include "node_map.hpp"
 #include "phone_location.hpp"
@@ -504,7 +505,7 @@ RadioSettingsPanel::RadioSettingsPanel(Client& client, QWidget* parent)
     notificationsRow_->setProperty("settingKeywords", ui("не беспокоить вибрация проверить вибрацию"));
     messagesRow_ = addSettingsRow(app, "Сообщения и маршруты", "messagePreferences", SettingGlyph::Messages);
     messagesRow_->setProperty("settingKeywords",
-        ui("непрочитанные заблокированные буквы кириллица превью ссылки повторы попытки отправка"));
+        ui("клавиатура ввод непрочитанные заблокированные буквы кириллица превью ссылки повторы попытки отправка"));
     attachmentsRow_ = addSettingsRow(app, "Вложения", "attachmentsSettings", SettingGlyph::Attachments);
     connect(attachmentsRow_, SIGNAL(clicked()), this, SLOT(showAttachments()), Qt::QueuedConnection);
     auto* backup = addSettingsRow(app, "Копия и перенос", "backupSettings", SettingGlyph::Backup);
@@ -1274,6 +1275,10 @@ void RadioSettingsPanel::showMessagePreferences() {
     if (blockedCount)
         setRowValue(blocked, QString::number(blockedCount));
     connect(blocked, SIGNAL(clicked()), this, SLOT(showBlockedSenders()), Qt::QueuedConnection);
+
+    auto* keyboard = settingsGroup(layout, content, ui("Клавиатура в переписке"));
+    option(keyboard, "Полноэкранный ввод", NativeKeyboard::FullScreenPreference,
+           "Включено: системный редактор во весь экран. Выключено: клавиатура снизу.");
 
     auto* compactRows = settingsGroup(layout, content, QString());
     auto* compact = option(compactRows, "Заменять похожие буквы", "ui/compactCyrillic",

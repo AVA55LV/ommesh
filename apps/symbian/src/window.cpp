@@ -621,6 +621,8 @@ QString themeStyle(const Appearance::Palette& colors) {
         "#chatOptionsActions QPushButton { min-height: 32px; text-align: left; color: @accent@; }"
         "#chatOptionsActions QPushButton#eraseChatMessages { color: @danger@; }"
         "#chatOptionsActions QPushButton#eraseChatMessages:disabled { color: @muted@; }"
+        "QPushButton#confirmChatErase { color: @danger@; border-color: @danger@; }"
+        "QPushButton#confirmChatErase:disabled { color: @muted@; border-color: @border@; }"
         "#networkNodeCard QLabel#networkNodeTitle { font-size: 20px; font-weight: bold; }"
         "#networkNodeCard QLabel#networkRowTitle { font-size: 15px; }"
         "#networkNodeCard QLabel#networkRowValue { color: @muted@; font-size: 13px; }"
@@ -2217,23 +2219,54 @@ void ClientWindow::showChatProfile(const ChatTarget& target) {
 
 void ClientWindow::confirmChatErase(const ChatTarget& target, const QString& radioKey) {
     const QString title = target.channel ? ui("Очистить сообщения") : ui("Удалить чат");
-    if (!client_.canEraseChatHistory(target.id, radioKey)) {
-        QMessageBox::information(this, title, ui("История сейчас недоступна для удаления."));
+    const bool available = client_.canEraseChatHistory(target.id, radioKey);
+    QWidget* content = surface(this, "chatEraseContent");
+    auto* layout = new QVBoxLayout(content);
+    layout->setContentsMargins(1, 6, 1, 6);
+    QLabel* prompt = label(available
+        ? ui("Удалить локальную историю «%1» на этом телефоне?").arg(target.title)
+        : ui("История сейчас недоступна для удаления."), content, "chatErasePrompt");
+    prompt->setWordWrap(true);
+    layout->addWidget(prompt);
+    layout->addSpacing(6);
+    auto* actions = new QHBoxLayout;
+    auto* cancel = button(ui("Отмена"), content);
+    cancel->setObjectName(QLatin1String("cancelChatErase"));
+    auto* confirm = button(target.channel ? ui("Очистить") : ui("Удалить"), content);
+    confirm->setObjectName(QLatin1String("confirmChatErase"));
+    confirm->setEnabled(available);
+    actions->addWidget(cancel, 1);
+    actions->addWidget(confirm, 1);
+    layout->addLayout(actions);
+    layout->addStretch(1);
+
+    chatSheetTargetId_ = target.id;
+    chatSheetRadioKey_ = radioKey;
+    chatSheetSession_ = client_.radioSessionToken();
+    chatSheet_ = new BottomSheet(this, content, title, false, [this] { closeChatOptions(); });
+    chatSheet_->setObjectName(QLatin1String("chatEraseOverlay"));
+    chatSheet_->closeButton()->hide();
+    connect(cancel, SIGNAL(clicked()), this, SLOT(closeChatOptions()), Qt::QueuedConnection);
+    connect(confirm, SIGNAL(clicked()), this, SLOT(applyChatErase()), Qt::QueuedConnection);
+    cancel->setFocus(Qt::OtherFocusReason);
+}
+
+void ClientWindow::applyChatErase() {
+    auto* confirm = qobject_cast<QPushButton*>(sender());
+    if (!confirm || !confirm->isEnabled() || !chatSheet_ || !chatSheet_->isAncestorOf(confirm))
+        return;
+    const QString id = chatSheetTargetId_;
+    const bool channel = id.startsWith(QLatin1String("c/"));
+    if (chatSheetSession_ != client_.radioSessionToken() || !client_.eraseChatHistory(id, chatSheetRadioKey_)) {
+        auto* prompt = chatSheet_->findChild<QLabel*>(QLatin1String("chatErasePrompt"));
+        prompt->setText(ui("Не удалось удалить историю. Закройте окно и повторите действие."));
+        confirm->setEnabled(false);
         return;
     }
-    const QString question = ui("Удалить локальную историю «%1» на этом телефоне?").arg(target.title);
-    QMessageBox confirmation(QMessageBox::Question, title, question, QMessageBox::Yes | QMessageBox::No, this);
-    confirmation.setTextFormat(Qt::PlainText);
-    confirmation.setDefaultButton(QMessageBox::No);
-    if (confirmation.exec() != QMessageBox::Yes)
-        return;
-    if (!client_.eraseChatHistory(target.id, radioKey)) {
-        QMessageBox::information(this, title, ui("Не удалось удалить историю этого разговора."));
-        return;
-    }
-    if (!target.channel) {
-        drafts_.remove(target.id);
-        setPinned(target.id, false);
+    dismissChatOptions(true);
+    if (!channel) {
+        drafts_.remove(id);
+        setPinned(id, false);
     }
 }
 

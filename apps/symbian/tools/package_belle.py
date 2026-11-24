@@ -48,12 +48,17 @@ def compile_bitmap_registration(
         or color + image[0] != mask or mask + transparency[0] != directory
     ):
         raise ValueError("Launcher MBM requires a 64px color bitmap and grayscale mask")
+    # The Belle launcher treats an EGray256 soft mask as alpha.
+    alpha = icon[mask + 40:directory]
+    if any(alpha[corner] for corner in (0, 63, 63 * 64, 64 * 64 - 1)) or alpha[32 * 64 + 32] != 255:
+        raise ValueError("Launcher mask requires transparent corners and an opaque center")
 
     # Reuse the SDK's registration UID and locale validation. Its standard icon
     # builder only emits vector MIFs, so compile CAPTION_AND_ICON_INFO for MBM.
     sdk = project_sdk(project)
     registration, _ = compile_registration(project, captions, executable_name, uid3, sdk=sdk)
     stem = Path(executable_name).stem
+    icon_name = f"{stem}_icon.mbm"
     assets = [registration[0]]
     locales = {0: captions}
     locales.update({_LANGUAGES[tag]: text for tag, text in captions.get("localizations", {}).items()})
@@ -69,14 +74,14 @@ def compile_bitmap_registration(
                 "  {\n"
                 f'    caption = "{text["caption"]}";\n'
                 "    number_of_icons = 1;\n"
-                f'    icon_file = "\\\\resource\\\\apps\\\\{stem}.mbm";\n'
+                f'    icon_file = "\\\\resource\\\\apps\\\\{icon_name}";\n'
                 "  };\n"
                 "}\n"
             )
             extension = "rsc" if number == 0 else f"r{number:02d}"
             target = f"!:\\resource\\apps\\{stem}_loc.{extension}"
             assets.append((target, _resource(sdk, Path(temporary), f"loc{number:02d}", source)))
-    assets.append((f"!:\\resource\\apps\\{stem}.mbm", icon))
+    assets.append((f"!:\\resource\\apps\\{icon_name}", icon))
     return assets
 
 
