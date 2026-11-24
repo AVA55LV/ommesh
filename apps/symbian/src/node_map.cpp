@@ -1,6 +1,7 @@
 #include "node_map.hpp"
 #include "appearance.hpp"
 #include "client.hpp"
+#include "emoji_line.hpp"
 #include "local_tile_proxy.hpp"
 #include "settings_icons.hpp"
 
@@ -23,6 +24,7 @@
 #include <QtGui/QImage>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QLabel>
+#include <QtGui/QLineEdit>
 #include <QtGui/QMenu>
 #include <QtGui/QMouseEvent>
 #include <QtGui/QPainter>
@@ -60,6 +62,7 @@ const int MaximumTileBytes = 160 * 1024;
 const int MaximumOnlineZoom = 17;
 const int MinimumOfflineScaleMeters = 200;
 const int MinimumOnlineZoom = 1;
+const int RelayPort = 8765;
 const int CameraDuration = 165;
 const int CameraFrame = 26;
 const int EmptyX = 73375000;
@@ -73,6 +76,43 @@ QString ru(const char* text) { return QString::fromUtf8(text); }
 QColor color(QRgb rgb) { return QColor::fromRgb(rgb); }
 
 QString credit() { return ru("© OpenStreetMap contributors"); }
+
+QString computerUrl(const QString& input) {
+    const QStringList endpoint = input.trimmed().split(QLatin1Char(':'));
+    if (endpoint.size() > 2)
+        return QString();
+    const QString host = endpoint.first();
+    const QStringList octets = host.split(QLatin1Char('.'));
+    if (octets.size() != 4)
+        return QString();
+    auto integer = [](const QString& text, int maxSize, int maxValue) {
+        if (text.isEmpty() || text.size() > maxSize)
+            return -1;
+        int value = 0;
+        for (int i = 0; i < text.size(); ++i) {
+            const ushort digit = text.at(i).unicode();
+            if (digit < '0' || digit > '9')
+                return -1;
+            value = value * 10 + digit - '0';
+        }
+        return value <= maxValue ? value : -1;
+    };
+    int ip[4];
+    for (int i = 0; i < 4; ++i) {
+        const QString value = octets.at(i);
+        if ((ip[i] = integer(value, 3, 255)) < 0 ||
+            (value.size() > 1 && value.at(0) == QLatin1Char('0')))
+            return QString();
+    }
+    bool local = ip[0] == 10 || (ip[0] == 172 && ip[1] >= 16 && ip[1] <= 31) ||
+                 (ip[0] == 192 && ip[1] == 168);
+#ifndef Q_OS_SYMBIAN
+    local = local || (ip[0] == 127 && ip[1] == 0 && ip[2] == 0 && ip[3] == 1);
+#endif
+    const int port = endpoint.size() == 2 ? integer(endpoint.last(), 5, 65535) : RelayPort;
+    return local && port > 0
+        ? QString::fromLatin1("http://%1:%2/tiles/").arg(host).arg(port) : QString();
+}
 
 QPointF project(qint32 latitude, qint32 longitude) {
     const double degrees = std::max(-MaxLatitude, std::min(MaxLatitude, latitude / 1000000.0));
@@ -461,6 +501,7 @@ struct NodeMap::State {
     QSet<QString> attempted;
     QSet<QString> visibleKeys;
     Source source = Offline;
+    QString relayBase;
     QString issue;
     bool worldTried = false;
     bool firstTile = true;
@@ -516,6 +557,16 @@ struct NodeMap::State {
         const QRect field = openMapRect();
         return QRect(field.left() + 9, qMax(field.top() + 28, field.bottom() - 70),
                      qMax(1, field.width() - 18), 35);
+    }
+
+    QRect retryRect() const {
+        const QRect area = hintRect();
+        return QRect(area.left(), area.top(), qMax(1, area.width() / 2 - 2), area.height());
+    }
+
+    QRect settingsRect() const {
+        const QRect area = hintRect();
+        return area.adjusted(area.width() / 2 + 2, 0, 0, 0);
     }
 
     static double zoomScale(int level) { return static_cast<double>(TileSide << level); }
@@ -616,7 +667,7 @@ struct NodeMap::State {
     }
 
     int maximumZoom(const QPointF& position) const {
-        if (source == Loopback)
+        if (source != Offline)
             return MaximumOnlineZoom;
         const double limit = offlineScaleLimit(position);
         int level = 0;
@@ -738,11 +789,13 @@ struct NodeMap::State {
                 ? ru("Офлайн: подложка недоступна")
                 : ru("Офлайн · узлы %1/%2").arg(pins.size()).arg(nodeCount);
         }
-        return complete ? ru("OSM · localhost · готово") : ru("OSM · localhost · загрузка");
+        if (source == Computer)
+            return complete ? ru("OSM · через компьютер · готово") : ru("OSM · через компьютер · загрузка");
+        return complete ? ru("OSM · на телефоне · готово") : ru("OSM · на телефоне · загрузка");
     }
 
     void schedule() {
-        if (source != Loopback || !owner->isVisible() || camera.isActive()) {
+        if (source == Offline || !owner->isVisible() || camera.isActive()) {
             return;
         }
         QSet<QString> nextVisible;
@@ -907,7 +960,7 @@ struct NodeMap::State {
         if (!network) {
             mark("map: create network manager");
             network = new QNetworkAccessManager(owner);
-            // Map HTTP requests go to the proxy inside this phone.
+            // Map HTTP requests go directly to a local tile relay.
             network->setProxy(QNetworkProxy(QNetworkProxy::NoProxy));
             mark("map: setup tile cache");
             disk = new QNetworkDiskCache(owner);
@@ -1120,8 +1173,8 @@ struct NodeMap::State {
             const QPoint& position = visible.at(i).position;
             if (pin.name.isEmpty())
                 continue;
-            const QString name = metrics.elidedText(pin.name, Qt::ElideRight, 106);
-            const int w = metrics.width(name) + 8;
+            const EmojiLine name(pin.name, metrics, 106);
+            const int w = name.width() + 8;
             const int h = metrics.height() + 4;
             const QRect candidates[] = {
                 QRect(position.x() + 11, position.y() - h / 2, w, h),
@@ -1147,7 +1200,7 @@ struct NodeMap::State {
                 painter.setBrush(color(Background));
                 painter.drawRoundedRect(label, 4, 4);
                 painter.setPen(color(pin.id == focused || pin.id == self.id ? Accent : Paper));
-                painter.drawText(label, Qt::AlignCenter, name);
+                name.draw(painter, label, Qt::AlignHCenter);
                 break;
             }
         }
@@ -1188,13 +1241,21 @@ void NodeMap::setTrace(const std::function<void(const char*, int)>& trace) {
 }
 
 NodeMap::Source NodeMap::sourceFromPreference(int value) {
-    // Values 1 and 2 were direct HTTPS and a computer relay, respectively.
-    return value == 1 || value == 2 || value == Loopback ? Loopback : Offline;
+    if (value == Computer)
+        return Computer;
+    return value == 1 || value == Loopback ? Loopback : Offline;
 }
 
-void NodeMap::setSource(Source source) {
+bool NodeMap::isComputerAddressValid(const QString& address) {
+    return !computerUrl(address).isEmpty();
+}
+
+void NodeMap::setSource(Source source, const QString& relayAddress) {
     State& s = *state_;
-    if (s.source == source) {
+    const QString address = source == Computer && relayAddress.isEmpty()
+        ? QSettings().value(QLatin1String("map/computer")).toString() : relayAddress;
+    const QString base = source == Computer ? computerUrl(address) : QString();
+    if (s.source == source && s.relayBase == base) {
         return;
     }
     s.mark("map: apply source", static_cast<int>(source));
@@ -1206,6 +1267,7 @@ void NodeMap::setSource(Source source) {
     s.visibleKeys.clear();
     s.clearIssue();
     s.source = source;
+    s.relayBase = base;
     if (s.framing != State::Manual) {
         s.fit();
     } else {
@@ -1322,7 +1384,7 @@ void NodeMap::hideEvent(QHideEvent* event) {
         state_->zoom = state_->boundedZoom(state_->cameraZoom, state_->center);
         state_->stopCamera();
     }
-    if (state_->source == Loopback) {
+    if (state_->source != Offline) {
         state_->cancel();
         state_->stopLoopback();
     }
@@ -1374,7 +1436,9 @@ void NodeMap::mouseReleaseEvent(QMouseEvent* event) {
     if (s.dragging || (point - s.first).manhattanLength() >= 7) {
         return;
     }
-    if (!s.issue.isEmpty() && s.hintRect().contains(point)) {
+    if (!s.issue.isEmpty() && s.retryRect().contains(point)) {
+        retryOnlineTiles();
+    } else if (!s.issue.isEmpty() && s.settingsRect().contains(point)) {
         emit settingsRequested();
     } else if (s.mapRect().contains(point)) {
         for (int i = 0; i < s.pinLabels.size(); ++i) {
@@ -1419,6 +1483,7 @@ void NodeMap::keyPressEvent(QKeyEvent* event) {
         case Qt::Key_0: s.overview(); break;
         case Qt::Key_O: s.showRegion(); break;
         case Qt::Key_C: s.centerOnRadio(); break;
+        case Qt::Key_R: retryOnlineTiles(); break;
         default: QWidget::keyPressEvent(event); break;
     }
 }
@@ -1521,17 +1586,36 @@ void NodeMap::paintEvent(QPaintEvent*) {
     painter.drawLine(13, baseline - 3, 13, baseline + 3);
     painter.drawLine(13 + pixels, baseline - 3, 13 + pixels, baseline + 3);
     if (!s.issue.isEmpty()) {
-        const QRect hint = s.hintRect();
-        painter.fillRect(hint, color(Chrome));
+        const QRect retry = s.retryRect();
+        const QRect settings = s.settingsRect();
+        painter.fillRect(retry, color(Chrome));
+        painter.fillRect(settings, color(Chrome));
         painter.setPen(color(Paper));
-        painter.drawText(hint.adjusted(6, 2, -6, -2), Qt::AlignCenter, ru("Открыть настройки карты"));
+        painter.drawText(retry, Qt::AlignCenter, ru("Повторить"));
+        painter.drawText(settings, Qt::AlignCenter, ru("Настройки"));
     }
     painter.restore();
 }
 
+void NodeMap::retryOnlineTiles() {
+    State& s = *state_;
+    if (s.source == Offline || s.issue.isEmpty())
+        return;
+    s.cancel();
+    s.stopLoopback();
+    s.clearIssue();
+    s.firstTile = true;
+    s.updateView();
+}
+
 void NodeMap::loadVisibleTiles() {
     State& s = *state_;
-    if (s.source != Loopback || s.reply || !isVisible() || !s.issue.isEmpty() || s.camera.isActive()) {
+    if (s.source == Offline || s.reply || !isVisible() || !s.issue.isEmpty() || s.camera.isActive()) {
+        return;
+    }
+    if (s.source == Computer && s.relayBase.isEmpty()) {
+        s.issue = ru("Укажите IPv4 компьютера в настройках карты");
+        update();
         return;
     }
     s.prepareNetwork();
@@ -1549,7 +1633,8 @@ void NodeMap::loadVisibleTiles() {
         }
         s.attempted.insert(key);
         // Keep the cache stable when the local proxy restarts on a different port.
-        const QUrl cacheUrl(QLatin1String("http://localhost/ommesh-osm-tiles/") + key);
+        const QUrl cacheUrl((s.source == Computer ? s.relayBase
+            : QString::fromLatin1("http://localhost/ommesh-osm-tiles/")) + key);
         QNetworkCacheMetaData saved = s.disk->metaData(cacheUrl);
         if (saved.isValid() && saved.expirationDate() > now) {
             const QImage image = decodeTile(s.stored(cacheUrl));
@@ -1562,12 +1647,12 @@ void NodeMap::loadVisibleTiles() {
                 continue;
             }
         }
-        if (!s.prepareLoopback()) {
+        if (s.source == Loopback && !s.prepareLoopback()) {
             update();
             return;
         }
-        QNetworkRequest request(QUrl(s.localProxy->baseUrl() + key));
-        request.setRawHeader("User-Agent", "OMMesh-Belle-SIS/0.2.33 (+https://github.com/cm4ker/ommesh)");
+        QNetworkRequest request(QUrl((s.source == Computer ? s.relayBase : s.localProxy->baseUrl()) + key));
+        request.setRawHeader("User-Agent", "OMMesh-Belle-SIS/0.2.38 (+https://github.com/cm4ker/ommesh)");
         request.setRawHeader("Accept", "image/png");
         request.setRawHeader("Accept-Encoding", "identity");
         const QNetworkCacheMetaData::RawHeaderList previous = saved.rawHeaders();
@@ -1671,14 +1756,18 @@ void NodeMap::finishTile() {
             }
         }
     } else if (failure.isEmpty()) {
-        if (s.localProxy && (status == 502 || status == 504) && !s.localProxy->lastError().isEmpty()) {
+        if (s.source == Loopback && s.localProxy && (status == 502 || status == 504) &&
+                !s.localProxy->lastError().isEmpty()) {
             failure = s.localProxy->lastError();
+        } else if (s.source == Computer && (status == 502 || status == 504)) {
+            failure = ru("Мост не получил плитку. Проверьте его окно на ПК.");
         } else if (status > 0) {
             failure = ru("Сервер карты: HTTP %1").arg(status);
         } else if (reply->error() == QNetworkReply::ContentAccessDenied) {
             failure = ru("Проверьте разрешение сети");
         } else {
-            failure = ru("Нет связи с прокси на телефоне");
+            failure = s.source == Computer ? ru("Нет связи с мостом. Проверьте IPv4 и Wi-Fi.")
+                                           : ru("Нет связи с прокси на телефоне");
         }
     }
     reply->deleteLater();
@@ -1709,10 +1798,11 @@ void NodeMap::abortFailedTile() {
 
 MapSettingsPanel::MapSettingsPanel(QWidget* parent)
     : QWidget(parent), modes_(new QButtonGroup(this)), regions_(new QButtonGroup(this)),
-      regionChoices_(new QWidget(this)), instructions_(new QLabel(this)), validation_(new QLabel(this)) {
+      regionChoices_(new QWidget(this)), instructions_(new QLabel(this)),
+      address_(new QLineEdit(this)), validation_(new QLabel(this)) {
     setFocusPolicy(Qt::StrongFocus);
     setStyleSheet(QLatin1String(
-        "QPushButton#mapOffline:checked, QPushButton#mapLoopback:checked,"
+        "QPushButton#mapOffline:checked, QPushButton#mapLoopback:checked, QPushButton#mapThroughComputer:checked,"
         "QPushButton#mapRegionOmsk:checked, QPushButton#mapRegionOblast:checked,"
         "QPushButton#mapRegionSiberia:checked, QPushButton#mapRegionWorld:checked"
         " { border: 1px solid #62d5be; background: #26413f; color: #baf4e7; }"
@@ -1723,7 +1813,8 @@ MapSettingsPanel::MapSettingsPanel(QWidget* parent)
     modes_->setExclusive(true);
     const struct { NodeMap::Source mode; const char* caption; const char* name; } options[] = {
         {NodeMap::Offline, "Офлайн", "mapOffline"},
-        {NodeMap::Loopback, "OpenStreetMap · localhost", "mapLoopback"},
+        {NodeMap::Loopback, "OpenStreetMap · на телефоне", "mapLoopback"},
+        {NodeMap::Computer, "Через компьютер", "mapThroughComputer"},
     };
     for (const auto& option : options) {
         auto* button = new QPushButton(ru(option.caption), this);
@@ -1736,6 +1827,12 @@ MapSettingsPanel::MapSettingsPanel(QWidget* parent)
     instructions_->setTextFormat(Qt::PlainText);
     instructions_->setWordWrap(true);
     layout->addWidget(instructions_);
+    address_->setObjectName(QLatin1String("mapComputerAddress"));
+    address_->setMaxLength(21);
+    address_->setMinimumHeight(38);
+    address_->setInputMethodHints(Qt::ImhNoPredictiveText);
+    address_->setPlaceholderText(ru("Адрес компьютера"));
+    layout->addWidget(address_);
     auto* regionLayout = new QGridLayout(regionChoices_);
     regionLayout->setContentsMargins(0, 0, 0, 0);
     regionLayout->setSpacing(4);
@@ -1773,6 +1870,7 @@ void MapSettingsPanel::reload() {
     const int savedRegion = preferences.value(QLatin1String("map/region"), NodeMap::OmskCity).toInt();
     regions_->button(qBound(static_cast<int>(NodeMap::OmskCity), savedRegion,
                             static_cast<int>(NodeMap::World)))->setChecked(true);
+    address_->setText(preferences.value(QLatin1String("map/computer")).toString());
     selectMode(selected);
 }
 
@@ -1782,9 +1880,14 @@ void MapSettingsPanel::selectMode(int mode) {
     }
     validation_->hide();
     regionChoices_->setVisible(mode == NodeMap::Offline);
-    instructions_->setText(mode == NodeMap::Offline
-        ? ru("Выберите начальную область. Карты работают без интернета и приближаются до 200 м.")
-        : ru("Прокси localhost работает на телефоне. Для плиток OpenStreetMap допускается неизвестный центр сертификации. Нужен интернет."));
+    address_->setVisible(mode == NodeMap::Computer);
+    if (mode == NodeMap::Computer) {
+        instructions_->setText(ru("Запустите start-map-relay.cmd на компьютере в той же сети и введите показанный IPv4. Компьютеру нужен интернет."));
+    } else if (mode == NodeMap::Loopback) {
+        instructions_->setText(ru("Телефону нужен интернет. При ошибке DNS подключите его к сети с интернетом или выберите «Через компьютер»."));
+    } else {
+        instructions_->setText(ru("Выберите начальную область. Карты работают без интернета и приближаются до 200 м."));
+    }
 }
 
 void MapSettingsPanel::scheduleSave() {
@@ -1803,10 +1906,18 @@ void MapSettingsPanel::save() {
         return;
     }
     const int mode = modes_->checkedId();
+    const QString address = address_->text().trimmed();
+    if (mode == NodeMap::Computer && !NodeMap::isComputerAddressValid(address)) {
+        validation_->setText(ru("Введите местный IPv4 компьютера, например 192.168.1.20, или IPv4 с портом."));
+        validation_->show();
+        return;
+    }
     QSettings preferences;
     preferences.setValue(QLatin1String("map/source"), mode);
     if (mode == NodeMap::Offline) {
         preferences.setValue(QLatin1String("map/region"), regions_->checkedId());
+    } else if (mode == NodeMap::Computer) {
+        preferences.setValue(QLatin1String("map/computer"), address);
     }
     preferences.sync();
     if (preferences.status() != QSettings::NoError) {

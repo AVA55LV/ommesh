@@ -10,6 +10,7 @@ class QButtonGroup;
 class QHideEvent;
 class QKeyEvent;
 class QLabel;
+class QLineEdit;
 class QMouseEvent;
 class QPaintEvent;
 class QResizeEvent;
@@ -20,7 +21,7 @@ class NodeMap : public QWidget {
     Q_OBJECT
 
 public:
-    enum Source { Offline = 0, Loopback = 3 };
+    enum Source { Offline = 0, Computer = 2, Loopback = 3 };
     enum OfflineRegion { OmskCity, OmskOblast, Siberia, World };
     explicit NodeMap(QWidget* parent = nullptr);
     ~NodeMap() override;
@@ -30,9 +31,10 @@ public:
     void setSelfNode(const NetworkNode& node);
     bool focusNode(const NetworkNode& node);
     void setExpanded(bool expanded);
-    void setSource(Source source);
+    void setSource(Source source, const QString& relayAddress = QString());
     void setOfflineRegion(OfflineRegion region);
     static Source sourceFromPreference(int value);
+    static bool isComputerAddressValid(const QString& address);
     QString statusText() const;
 
 signals:
@@ -53,6 +55,7 @@ protected:
 private slots:
     void activateControl(int control);
     void advanceCamera();
+    void retryOnlineTiles();
     void loadVisibleTiles();
     void readTileData();
     void finishCurrentReply();
@@ -85,6 +88,7 @@ private:
     QButtonGroup* regions_;
     QWidget* regionChoices_;
     QLabel* instructions_;
+    QLineEdit* address_;
     QLabel* validation_;
     bool saveQueued_ = false;
 };

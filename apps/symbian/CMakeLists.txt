@@ -39,7 +39,7 @@ add_custom_command(
 )
 
 set(moc_sources)
-foreach(class IN ITEMS client window chat_features node_map radio_settings native_wlan native_location phone_location link_preview network_filters network_node_card network_node_management settings_attachments settings_backup settings_radio_backup settings_radio_editor settings_radio_tools)
+foreach(class IN ITEMS client window chat_features node_map radio_settings native_wlan native_location phone_location link_preview network_filters network_node_card network_node_management settings_attachments settings_backup settings_radio_backup settings_radio_editor settings_radio_tools custom_keyboard)
   set(header "${CMAKE_CURRENT_SOURCE_DIR}/src/${class}.hpp")
   set(moc_source "${CMAKE_CURRENT_BINARY_DIR}/moc_${class}.cpp")
   add_custom_command(
@@ -50,6 +50,15 @@ foreach(class IN ITEMS client window chat_features node_map radio_settings nativ
   )
   list(APPEND moc_sources "${moc_source}")
 endforeach()
+
+set(keyboard_layout_moc "${CMAKE_CURRENT_BINARY_DIR}/keyboard_layout.moc")
+add_custom_command(
+  OUTPUT "${keyboard_layout_moc}"
+  COMMAND "${QT4_MOC_EXECUTABLE}" -o "${keyboard_layout_moc}" "${CMAKE_CURRENT_SOURCE_DIR}/src/keyboard_layout.cpp"
+  DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/src/keyboard_layout.cpp"
+  VERBATIM
+)
+set_source_files_properties(src/keyboard_layout.cpp PROPERTIES OBJECT_DEPENDS "${keyboard_layout_moc}")
 
 symbian_add_executable(ommesh_belle SOURCES
   src/main.cpp
@@ -79,6 +88,7 @@ symbian_add_executable(ommesh_belle SOURCES
   src/native_location.cpp
   src/native_keyboard.cpp
   src/keyboard_layout.cpp
+  src/custom_keyboard.cpp
   src/phone_location.cpp
   src/native_tile_https.cpp
   src/native_allocator.cpp
@@ -95,9 +105,10 @@ list(REMOVE_ITEM application_sources ${host_test_sources})
 set_property(TARGET ommesh_belle PROPERTY SOURCES ${application_sources})
 
 target_sources(ommesh_belle PRIVATE ${moc_sources} "${map_resources}")
+target_include_directories(ommesh_belle PRIVATE "${CMAKE_CURRENT_BINARY_DIR}")
 # The E32 loader resolves Qt's imported metaobject and vtable pointers in
 # read-only storage. Keep moc's const tables there while retaining relocations.
-set_source_files_properties(${moc_sources} PROPERTIES COMPILE_OPTIONS "-fno-pic;-fno-pie")
+set_source_files_properties(${moc_sources} src/keyboard_layout.cpp PROPERTIES COMPILE_OPTIONS "-fno-pic;-fno-pie")
 # Qt metatype registration keeps writable IDs with process lifetime. Use
 # absolute relocations for those IDs so Belle can move the data independently.
 set_source_files_properties(src/native_wlan.cpp PROPERTIES COMPILE_OPTIONS "-fno-pic;-fno-pie")

@@ -8,6 +8,7 @@
 #include <QtCore/QPointer>
 #include <QtCore/QStringList>
 #include <QtGui/QBrush>
+#include <QtGui/QImage>
 #include <QtGui/QWidget>
 #include <optional>
 
@@ -35,6 +36,7 @@ QString makeQuotePrefix(const QString& author, const QString& message,
                         const QStringList& newerTexts, int availableBytes);
 int emojiCount();
 QString emojiValue(int index);
+QImage emojiSpriteAt(const QString& text, int start, int* end = nullptr);
 
 } // namespace ChatFeatures
 

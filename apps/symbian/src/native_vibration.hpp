@@ -12,7 +12,7 @@ public:
     NativeVibration& operator=(const NativeVibration&) = delete;
     ~NativeVibration();
 
-    int pulse();
+    int pulse(int durationMs = 250);
 
 private:
     CHWRMVibra* motor_ = nullptr;

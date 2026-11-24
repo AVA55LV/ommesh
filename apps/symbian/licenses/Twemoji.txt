@@ -1,0 +1,9 @@
+Twemoji graphics, version 15.1.0
+Copyright Twitter, Inc. and other contributors.
+
+Source: https://github.com/jdecked/twemoji/tree/v15.1.0
+Graphics license: Creative Commons Attribution 4.0 International (CC BY 4.0)
+https://creativecommons.org/licenses/by/4.0/
+
+OMMesh Belle selects graphics from this set and resizes them to 24×24 pixels,
+reduces their palette, and compresses them into its emoji atlas.

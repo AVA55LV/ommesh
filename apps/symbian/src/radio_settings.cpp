@@ -1249,6 +1249,7 @@ void RadioSettingsPanel::showAbout() {
     layout->setContentsMargins(0, 0, 0, 0);
     addText(layout, ui("OMMesh Belle %1").arg(QApplication::applicationVersion()), page);
     addText(layout, ui("Клиент MeshCore для Nokia 700 и Symbian Belle."), page);
+    addText(layout, ui("Часть изображений эмодзи — Twemoji, © Twitter, Inc. и участники проекта. CC BY 4.0."), page);
     layout->addStretch(1);
     emit detailRequested(page, ui("О приложении"));
 }
@@ -1276,9 +1277,55 @@ void RadioSettingsPanel::showMessagePreferences() {
         setRowValue(blocked, QString::number(blockedCount));
     connect(blocked, SIGNAL(clicked()), this, SLOT(showBlockedSenders()), Qt::QueuedConnection);
 
-    auto* keyboard = settingsGroup(layout, content, ui("Системная клавиатура"));
-    option(keyboard, "Полноэкранный ввод", NativeKeyboard::FullScreenPreference,
-           "Выбирает клавиатуру во всём приложении. Выключено — клавиатура снизу.");
+    auto* keyboard = settingsGroup(layout, content, ui("Клавиатура"));
+    auto* custom = option(keyboard, "Встроенная клавиатура", NativeKeyboard::CustomEnabledPreference,
+                          "Заменяет системную клавиатуру в приложении.");
+    auto* fullScreen = option(keyboard, "Полноэкранный ввод", NativeKeyboard::FullScreenPreference,
+                              "Для системной клавиатуры. Выключено — клавиатура снизу.");
+    fullScreen->setDisabled(custom->isChecked());
+    connect(custom, SIGNAL(toggled(bool)), fullScreen, SLOT(setDisabled(bool)));
+
+    auto* customOptions = new QWidget(keyboard->parentWidget());
+    auto* customLayout = new QVBoxLayout(customOptions);
+    customLayout->setContentsMargins(0, 0, 0, 0);
+    customLayout->setSpacing(5);
+    addText(customLayout, ui("Цвет клавиатуры"), customOptions)->setContentsMargins(12, 4, 12, 0);
+    auto* themes = new QButtonGroup(customOptions);
+    auto* themeGrid = new QGridLayout;
+    themeGrid->setContentsMargins(10, 0, 10, 4);
+    themeGrid->setSpacing(5);
+    themeGrid->setColumnStretch(0, 1);
+    themeGrid->setColumnStretch(1, 1);
+    const struct { const char* id; const char* title; } keyboardThemes[] = {
+        {"graphite", "Графит"}, {"belle", "Belle"}, {"midnight", "Полночь"},
+        {"sand", "Песок"}, {"forest", "Лес"}, {"black", "Чёрная"},
+    };
+    const int themeCount = int(sizeof(keyboardThemes) / sizeof(keyboardThemes[0]));
+    const QString savedTheme = QSettings().value(QLatin1String(NativeKeyboard::CustomThemePreference),
+                                                  QLatin1String("graphite")).toString();
+    int selectedTheme = 0;
+    for (int index = 0; index < themeCount; ++index) {
+        if (savedTheme == QLatin1String(keyboardThemes[index].id))
+            selectedTheme = index;
+    }
+    for (int index = 0; index < themeCount; ++index) {
+        const QString id = QLatin1String(keyboardThemes[index].id);
+        auto* theme = new QPushButton(ui(keyboardThemes[index].title), customOptions);
+        theme->setObjectName(QLatin1String("customKeyboardTheme-") + id);
+        theme->setProperty("customKeyboardTheme", id);
+        theme->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        theme->setMinimumHeight(40);
+        theme->setCheckable(true);
+        theme->setChecked(index == selectedTheme);
+        themes->addButton(theme);
+        themeGrid->addWidget(theme, index / 2, index % 2);
+        connect(theme, SIGNAL(toggled(bool)), this, SLOT(setUserPreference(bool)));
+    }
+    customLayout->addLayout(themeGrid);
+    option(customLayout, "Вибрация при нажатии", NativeKeyboard::CustomVibrationPreference, "", true);
+    keyboard->addWidget(customOptions);
+    customOptions->setVisible(custom->isChecked());
+    connect(custom, SIGNAL(toggled(bool)), customOptions, SLOT(setVisible(bool)));
 
     auto* compactRows = settingsGroup(layout, content, QString());
     auto* compact = option(compactRows, "Заменять похожие буквы", "ui/compactCyrillic",
@@ -1502,6 +1549,15 @@ void RadioSettingsPanel::setUserPreference(bool enabled) {
     auto* button = qobject_cast<QPushButton*>(sender());
     if (!button)
         return;
+    const QString keyboardTheme = button->property("customKeyboardTheme").toString();
+    if (!keyboardTheme.isEmpty()) {
+        if (enabled) {
+            QSettings preferences;
+            preferences.setValue(QLatin1String(NativeKeyboard::CustomThemePreference), keyboardTheme);
+            preferences.sync();
+        }
+        return;
+    }
     const QByteArray key = button->objectName().toLatin1();
     button->setProperty("accessibleDescription", enabled ? ui("Включено") : ui("Выключено"));
     if (key == "ui/wlanRecovery") {
@@ -1560,7 +1616,8 @@ void RadioSettingsPanel::updateStatus() {
     if (mapsRow_) {
         const NodeMap::Source mapMode = NodeMap::sourceFromPreference(
             preferences.value(QLatin1String("map/source"), 0).toInt());
-        setRowValue(mapsRow_, mapMode == NodeMap::Loopback ? ui("На телефоне") : ui("Офлайн"));
+        setRowValue(mapsRow_, mapMode == NodeMap::Computer ? ui("Через компьютер") :
+                              mapMode == NodeMap::Loopback ? ui("На телефоне") : ui("Офлайн"));
     }
     if (refreshRow_)
         refreshRow_->setEnabled(online && !client_.busy());

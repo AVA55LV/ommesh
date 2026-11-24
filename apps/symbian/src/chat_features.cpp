@@ -40,6 +40,7 @@
 #include <QtGui/QPainter>
 #include <QtGui/QPainterPath>
 #include <QtGui/QPixmap>
+#include <QtGui/QPixmapCache>
 #include <QtGui/QPushButton>
 #include <QtGui/QResizeEvent>
 #include <QtGui/QScrollBar>
@@ -62,8 +63,11 @@
 namespace {
 
 #include "chat_emoji_data.inc"
+#include "chat_emoji_extra.inc"
 
-const int emojiTotal = sizeof(emojiCodes) / sizeof(emojiCodes[0]);
+const int originalEmojiCount = sizeof(emojiCodes) / sizeof(emojiCodes[0]);
+const int extraEmojiCount = sizeof(extraEmojiLookup) / sizeof(extraEmojiLookup[0]);
+const int emojiTotal = originalEmojiCount + extraEmojiCount;
 const int spriteSide = 24;
 const int originalEmoji = QTextFormat::UserProperty + 6;
 const int messageIndex = QTextFormat::UserProperty + 7;
@@ -112,12 +116,26 @@ uint scalarAt(const QString& text, int start) {
     return first;
 }
 
+int extraEmojiStart(uint code) {
+    const quint16* start = extraEmojiLookup;
+    const quint16* stop = std::lower_bound(start, start + extraEmojiCount, code, [](quint16 index, uint value) {
+        return extraEmojiSequence[extraEmojiSequenceOffsets[index]] < value;
+    });
+    return static_cast<int>(stop - start);
+}
+
 int basicEmoji(uint code) {
     if (code < 0x2300)
         return -1;
-    for (int i = 0; i < emojiTotal; ++i) {
+    for (int i = 0; i < originalEmojiCount; ++i) {
         if (emojiCodes[i] == code)
             return i;
+    }
+    const int row = extraEmojiStart(code);
+    if (row < extraEmojiCount) {
+        const int index = extraEmojiLookup[row];
+        if (extraEmojiSequence[extraEmojiSequenceOffsets[index]] == code)
+            return originalEmojiCount + index;
     }
     return code >= 0x1f000 && code <= 0x1faff ? emojiTotal : -1;
 }
@@ -137,29 +155,73 @@ int emojiSuffix(const QString& text, int position) {
     return position;
 }
 
+bool acceptsEmojiPresentation(uint code) {
+    return (code >= 0x2300 && code <= 0x2bff) || code == 0x00a9 || code == 0x00ae ||
+        code == 0x203c || code == 0x2049 || code == 0x2122 || code == 0x2139;
+}
+
+bool matchesExtraEmoji(int index, const QString& text, int from, int to) {
+    int offset = extraEmojiSequenceOffsets[index];
+    const int limit = extraEmojiSequenceOffsets[index + 1];
+    while (from < to) {
+        const uint code = scalarAt(text, from);
+        from = scalarEnd(text, from);
+        if (code == 0xfe0f)
+            continue;
+        while (offset < limit && extraEmojiSequence[offset] == 0xfe0f)
+            ++offset;
+        if (offset == limit || extraEmojiSequence[offset++] != code)
+            return false;
+    }
+    return offset == limit || (offset + 1 == limit && extraEmojiSequence[offset] == 0xfe0f);
+}
+
+int exactExtraEmoji(const QString& text, int from, int to, uint code) {
+    for (int row = extraEmojiStart(code); row < extraEmojiCount; ++row) {
+        const int index = extraEmojiLookup[row];
+        if (extraEmojiSequence[extraEmojiSequenceOffsets[index]] != code)
+            break;
+        if (matchesExtraEmoji(index, text, from, to))
+            return originalEmojiCount + index;
+    }
+    return -1;
+}
+
 int characterEnd(const QString& text, int position, int* image = 0) {
     const uint code = scalarAt(text, position);
     int end = scalarEnd(text, position);
     int kind = basicEmoji(code);
     const bool keycap = code == '#' || code == '*' || (code >= '0' && code <= '9');
     const bool variation = end < text.size() && text.at(end).unicode() == 0xfe0f;
-    if (keycap) {
+    if (end < text.size() && text.at(end).unicode() == 0xfe0e) {
+        if (image)
+            *image = -1;
+        return end + 1;
+    } else if (keycap) {
         const int keyEnd = end + (variation ? 1 : 0);
         if (keyEnd < text.size() && text.at(keyEnd).unicode() == 0x20e3) {
             kind = emojiTotal;
             end = keyEnd + 1;
         }
-    } else if (kind < 0 && variation && code >= 0x2300 && code <= 0x2bff) {
+    } else if (kind < 0 && variation && acceptsEmojiPresentation(code)) {
         kind = emojiTotal;
     }
     if (kind >= 0) {
+        const int baseEnd = end + (variation && !keycap ? 1 : 0);
         if (regional(code) && end < text.size() && regional(scalarAt(text, end)))
             end = scalarEnd(text, end);
         end = emojiSuffix(text, end);
-        while (end + 1 < text.size() && text.at(end).unicode() == 0x200d &&
-               basicEmoji(scalarAt(text, end + 1)) >= 0) {
-            kind = emojiTotal;
-            end = emojiSuffix(text, scalarEnd(text, end + 1));
+        while (end + 1 < text.size() && text.at(end).unicode() == 0x200d) {
+            const uint joined = scalarAt(text, end + 1);
+            const int joinedEnd = scalarEnd(text, end + 1);
+            if ((!acceptsEmojiPresentation(joined) && basicEmoji(joined) < 0) ||
+                    (joinedEnd < text.size() && text.at(joinedEnd).unicode() == 0xfe0e))
+                break;
+            end = emojiSuffix(text, joinedEnd);
+        }
+        if (kind >= originalEmojiCount || end != baseEnd) {
+            const int supported = exactExtraEmoji(text, position, end, code);
+            kind = supported >= 0 ? supported : emojiTotal;
         }
     }
     if (image)
@@ -167,11 +229,25 @@ int characterEnd(const QString& text, int position, int* image = 0) {
     return end;
 }
 
-QImage emojiImage(int index) {
+QImage decodeEmoji(int index) {
     QImage result(spriteSide, spriteSide, QImage::Format_ARGB32);
     if (result.isNull())
         return result;
     QRgb* pixel = reinterpret_cast<QRgb*>(result.bits());
+    if (index >= originalEmojiCount && index < emojiTotal) {
+        const int extra = index - originalEmojiCount;
+        const int begin = extraEmojiPixelOffsets[extra];
+        const int end = extraEmojiPixelOffsets[extra + 1];
+        const QByteArray rgba = qUncompress(extraEmojiPixels + begin, end - begin);
+        if (rgba.size() != spriteSide * spriteSide * 4)
+            return QImage();
+        const uchar* channel = reinterpret_cast<const uchar*>(rgba.constData());
+        for (int i = 0; i < spriteSide * spriteSide; ++i, channel += 4)
+            *pixel++ = qRgba(channel[0], channel[1], channel[2], channel[3]);
+        return result;
+    }
+    if (index == emojiTotal)
+        index = originalEmojiCount;
     const int begin = emojiOffsets[index];
     const int end = emojiOffsets[index + 1];
     for (int run = begin; run < end; run += 2) {
@@ -180,6 +256,17 @@ QImage emojiImage(int index) {
         for (int i = 0; i < count; ++i)
             *pixel++ = color;
     }
+    return result;
+}
+
+QImage emojiImage(int index) {
+    const QString key = QLatin1String("ommesh-emoji-sprite:") + QString::number(index);
+    QPixmap cached;
+    if (QPixmapCache::find(key, cached))
+        return cached.toImage();
+    const QImage result = decodeEmoji(index);
+    if (!result.isNull())
+        QPixmapCache::insert(key, QPixmap::fromImage(result));
     return result;
 }
 
@@ -949,6 +1036,11 @@ int emojiCount() {
 QString emojiValue(int index) {
     if (index < 0 || index >= emojiTotal)
         return QString();
+    if (index >= originalEmojiCount) {
+        const int extra = index - originalEmojiCount;
+        const int start = extraEmojiSequenceOffsets[extra];
+        return QString::fromUcs4(extraEmojiSequence + start, extraEmojiSequenceOffsets[extra + 1] - start);
+    }
     const uint code = emojiCodes[index];
     QString result = QString::fromUcs4(&code, 1);
     for (unsigned i = 0; i < sizeof(emojiPresentation) / sizeof(emojiPresentation[0]); ++i) {
@@ -958,6 +1050,14 @@ QString emojiValue(int index) {
         }
     }
     return result;
+}
+
+QImage emojiSpriteAt(const QString& text, int start, int* end) {
+    int image = -1;
+    const int next = start >= 0 && start < text.size() ? characterEnd(text, start, &image) : start;
+    if (end)
+        *end = next;
+    return image >= 0 ? emojiImage(image) : QImage();
 }
 
 } // namespace ChatFeatures
@@ -1685,9 +1785,6 @@ void ChatView::setAppearance(const Appearance::Palette& palette, int chatTextSiz
         "#nativeChat QTextEdit#messageComposer { background: @chrome; }"
         "#nativeChat QTextEdit#messageHistory { border: none; background: transparent; }"
         "#nativeChat QTextEdit#quotePreview { background: @chrome; border-left: 3px solid @accent; font-size: 14px; }"
-        "#nativeChat QScrollBar:vertical { background: @chrome; width: 7px; margin: 0; }"
-        "#nativeChat QScrollBar::handle:vertical { background: @border; min-height: 18px; border-radius: 3px; }"
-        "#nativeChat QScrollBar::add-line:vertical, #nativeChat QScrollBar::sub-line:vertical { height: 0; }"
         "#nativeChat QPushButton { color: @text; background: @surface; border: 1px solid @border;"
         " border-radius: 7px; padding: 4px 7px; }"
         "#nativeChat QPushButton#sendMessage { color: @onAccent; background: @accent; font-weight: bold; }"
@@ -2257,6 +2354,79 @@ void ChatView::showReactionAuthors(const ChatMessage& message, const QString& em
     dialog.exec();
 }
 
+namespace {
+
+const int emojiPageSize = 24;
+
+class EmojiTilePage : public QWidget {
+public:
+    EmojiTilePage(QWidget* parent, const QVector<int>& icons, QSignalMapper& selection)
+        : QWidget(parent), icons_(icons), selection_(selection), grid_(new QGridLayout(this)) {
+        grid_->setSpacing(4);
+        grid_->setContentsMargins(0, 0, 0, 0);
+        grid_->setAlignment(Qt::AlignLeft | Qt::AlignTop);
+    }
+
+protected:
+    void showEvent(QShowEvent* event) override {
+        QWidget::showEvent(event);
+        if (grid_->count() != 0)
+            return;
+        for (int cell = 0; cell < icons_.size(); ++cell) {
+            const int index = icons_.at(cell);
+            auto* tile = new QPushButton(QIcon(QPixmap::fromImage(emojiImage(index))), QString(), this);
+            tile->setObjectName(QLatin1String("emoji-") + QString::number(index));
+            tile->setProperty("accessibleName", ChatFeatures::emojiValue(index));
+            tile->setIconSize(QSize(30, 30));
+            tile->setFixedSize(42, 42);
+            grid_->addWidget(tile, cell / 6, cell % 6);
+            selection_.setMapping(tile, index + 2);
+            connect(tile, SIGNAL(clicked()), &selection_, SLOT(map()));
+        }
+    }
+
+    void hideEvent(QHideEvent* event) override {
+        while (QLayoutItem* item = grid_->takeAt(0)) {
+            QWidget* tile = item->widget();
+            tile->setObjectName(QString());
+            tile->hide();
+            tile->deleteLater();
+            delete item;
+        }
+        QWidget::hideEvent(event);
+    }
+
+private:
+    const QVector<int> icons_;
+    QSignalMapper& selection_;
+    QGridLayout* grid_;
+};
+
+QWidget* makeEmojiCategory(QWidget* parent, const QVector<int>& icons, int category, QSignalMapper& selection) {
+    if (icons.size() <= emojiPageSize)
+        return new EmojiTilePage(parent, icons, selection);
+    auto* panel = new QWidget(parent);
+    auto* layout = new QVBoxLayout(panel);
+    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setSpacing(4);
+    auto* pages = new QStackedWidget(panel);
+    auto* tabs = new QTabBar(panel);
+    tabs->setObjectName(QLatin1String("emojiPageTabs-") + QString::number(category));
+    tabs->setStyleSheet(QLatin1String("QTabBar::tab { min-width: 36px; }"));
+    tabs->setExpanding(false);
+    tabs->setDrawBase(false);
+    for (int start = 0; start < icons.size(); start += emojiPageSize) {
+        pages->addWidget(new EmojiTilePage(pages, icons.mid(start, emojiPageSize), selection));
+        tabs->addTab(QString::number(tabs->count() + 1));
+    }
+    QObject::connect(tabs, SIGNAL(currentChanged(int)), pages, SLOT(setCurrentIndex(int)));
+    layout->addWidget(pages, 1);
+    layout->addWidget(tabs);
+    return panel;
+}
+
+} // namespace
+
 int ChatView::pickEmoji(const QString& title) {
     QDialog dialog(this);
     dialog.setObjectName(QLatin1String("emojiPicker"));
@@ -2288,32 +2458,21 @@ int ChatView::pickEmoji(const QString& title) {
     categories->setElideMode(Qt::ElideRight);
     QSignalMapper* selection = new QSignalMapper(&dialog);
     const char* names[] = {"Частые", "Лица", "Жесты", "Знаки", "Разное"};
-    const int starts[] = {0, 24, 36, 42, 51, emojiTotal};
+    const int starts[] = {0, 24, 36, 42, 51, originalEmojiCount};
     for (int page = 0; page < 5; ++page) {
         categories->addTab(ui(names[page]));
-        QWidget* panel = new QWidget(pages);
-        QGridLayout* grid = new QGridLayout(panel);
-        grid->setSpacing(4);
-        grid->setContentsMargins(0, 0, 0, 0);
-        grid->setAlignment(Qt::AlignLeft | Qt::AlignTop);
-        for (int index = starts[page]; index < starts[page + 1]; ++index) {
-            QPushButton* tile = new QPushButton(QIcon(QPixmap::fromImage(emojiImage(index))), QString(), panel);
-            tile->setObjectName(QLatin1String("emoji-") + QString::number(index));
-            tile->setProperty("accessibleName", ChatFeatures::emojiValue(index));
-            tile->setIconSize(QSize(30, 30));
-            tile->setFixedSize(42, 42);
-            const int cell = index - starts[page];
-            grid->addWidget(tile, cell / 6, cell % 6);
-            selection->setMapping(tile, index + 2);
-            connect(tile, SIGNAL(clicked()), selection, SLOT(map()));
-        }
-        pages->addWidget(panel);
+        QVector<int> icons;
+        for (int index = starts[page]; index < starts[page + 1]; ++index)
+            icons.append(index);
+        for (int index = extraEmojiGroupOffsets[page]; index < extraEmojiGroupOffsets[page + 1]; ++index)
+            icons.append(originalEmojiCount + index);
+        pages->addWidget(makeEmojiCategory(pages, icons, page, *selection));
     }
     connect(categories, SIGNAL(currentChanged(int)), pages, SLOT(setCurrentIndex(int)));
     connect(selection, SIGNAL(mapped(int)), &dialog, SLOT(done(int)));
     layout->addWidget(pages, 1);
     layout->addWidget(categories);
-    dialog.resize(qMax(300, width() - 18), 310);
+    dialog.resize(qMax(300, width() - 18), 340);
     const int picked = dialog.exec() - 2;
     return picked >= 0 && picked < emojiTotal ? picked : -1;
 }

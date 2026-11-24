@@ -12,7 +12,7 @@ NativeVibration::~NativeVibration() {
 #endif
 }
 
-int NativeVibration::pulse() {
+int NativeVibration::pulse(int durationMs) {
 #ifdef __SYMBIAN32__
     for (int attempt = 0; attempt < 2; ++attempt) {
         TRAPD(error, {
@@ -20,7 +20,7 @@ int NativeVibration::pulse() {
                 motor_ = CHWRMVibra::NewL();
             if (motor_->VibraSettings() == CHWRMVibra::EVibraModeOFF)
                 User::Leave(KErrAccessDenied);
-            motor_->StartVibraL(250);
+            motor_->StartVibraL(durationMs);
         });
         if (error != KErrBadHandle)
             return error;
@@ -29,6 +29,7 @@ int NativeVibration::pulse() {
     }
     return KErrBadHandle;
 #else
+    static_cast<void>(durationMs);
     return -5;
 #endif
 }

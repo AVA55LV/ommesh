@@ -2,6 +2,7 @@
 
 #include "chat_features.hpp"
 #include "demo_radio.hpp"
+#include "emoji_line.hpp"
 #include "message_text.hpp"
 #include "network_node_card.hpp"
 #include "network_node_management.hpp"
@@ -564,13 +565,12 @@ public:
         const bool pinned = index.data(ItemPinned).toBool();
         const int titleWidth = qMax(0, right - left - stampWidth - (stampWidth ? 8 : 0) - (pinned ? 16 : 0));
         const QFontMetrics titleMetrics(titleFont);
-        const QString displayTitle = titleMetrics.elidedText(title, Qt::ElideRight, titleWidth);
+        const EmojiLine displayTitle(title, titleMetrics, titleWidth);
         painter->setPen(colors.text);
-        painter->drawText(QRect(left, first, titleWidth, 22), Qt::AlignLeft | Qt::AlignVCenter,
-                          displayTitle);
+        displayTitle.draw(*painter, QRect(left, first, titleWidth, 22));
         if (pinned) {
             painter->setPen(colors.accent);
-            const int x = left + qMin(titleWidth, titleMetrics.width(displayTitle)) + 8;
+            const int x = left + qMin(titleWidth, displayTitle.width()) + 8;
             if (role > 0)
                 drawFavorite(*painter, x, first + 11);
             else
@@ -587,8 +587,7 @@ public:
         const QString detail = index.data(ItemDetail).toString();
         if (unread > 0)
             painter->setPen(colors.text);
-        painter->drawText(QRect(left, second, detailWidth, 21), Qt::AlignLeft | Qt::AlignVCenter,
-                          smallMetrics.elidedText(detail, Qt::ElideRight, detailWidth));
+        EmojiLine(detail, smallMetrics, detailWidth).draw(*painter, QRect(left, second, detailWidth, 21));
         if (badgeWidth) {
             const QRect badge(right - badgeWidth, second, badgeWidth, 22);
             painter->setPen(Qt::NoPen);
@@ -748,12 +747,15 @@ QString themeStyle(const Appearance::Palette& colors) {
         " selection-background-color: @selection@; }"
         "QMenu::item { padding: 10px 17px; }"
         "QListWidget, QScrollArea { border: 0; background: @canvas@; color: @text@; }"
-        "QScrollBar:vertical { background: @chrome@; width: 10px; margin: 0; }"
-        "QScrollBar::handle:vertical { background: @scrollHandle@; border-radius: 4px; min-height: 26px; }"
-        "#detailPage QScrollBar:vertical { width: 18px; }"
-        "#detailPage QScrollBar::handle:vertical { border-radius: 6px; min-height: 35px; }"
-        "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: @chrome@; }"
-        "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
+        "QScrollBar { background: transparent; margin: 0; }"
+        "QScrollBar:vertical { width: 18px; }"
+        "QScrollBar:horizontal { height: 18px; }"
+        // Paint 3 px of the thumb inside a wider touch target.
+        "QScrollBar::handle { background: @scrollHandle@; border-radius: 1px; }"
+        "QScrollBar::handle:vertical { margin: 0 7px 0 8px; min-height: 35px; }"
+        "QScrollBar::handle:horizontal { margin: 8px 0 7px; min-width: 35px; }"
+        "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }"
+        "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }"
         "QPushButton { background: @surface@; color: @text@; border: 1px solid @border@;"
         " border-radius: 8px; padding: 5px 9px; font-size: 15px; }"
         "QPushButton#settingsRetryNow { font-size: 13px; padding: 4px 6px; }"

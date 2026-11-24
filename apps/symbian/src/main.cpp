@@ -71,11 +71,12 @@ int runApplication(StartupTrace& trace) {
     NativeKeyboard::Application app(argc, argv);
 #else
     QApplication app(argc, argv);
+    NativeKeyboard::watchEditors(app);
 #endif
     trace.mark(_L8("OMMesh: QApplication constructed"));
     QApplication::setOrganizationName(QString::fromLatin1("OMMeshBelle"));
     QApplication::setApplicationName(QString::fromLatin1("OMMesh"));
-    QApplication::setApplicationVersion(QString::fromLatin1("0.2.33"));
+    QApplication::setApplicationVersion(QString::fromLatin1("0.2.38"));
 
 #ifdef Q_OS_SYMBIAN
     // This firmware callback runs an exit animation that some Nokia ROMs and
@@ -104,7 +105,7 @@ int runApplication(StartupTrace& trace) {
 
 int main() {
     StartupTrace trace;
-    trace.mark(_L8("OMMesh 0.2.33: main entered"));
+    trace.mark(_L8("OMMesh 0.2.38: main entered"));
     TInt result = KErrNone;
     TRAPD(error, result = runApplication(trace));
     if (error != KErrNone) {

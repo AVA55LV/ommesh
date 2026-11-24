@@ -13,6 +13,9 @@ class QApplication;
 namespace NativeKeyboard {
 
 constexpr char FullScreenPreference[] = "ui/fullScreenKeyboard";
+constexpr char CustomEnabledPreference[] = "ui/customKeyboard";
+constexpr char CustomThemePreference[] = "ui/customKeyboardTheme";
+constexpr char CustomVibrationPreference[] = "ui/customKeyboardVibration";
 constexpr char LayoutAnchor[] = "nativeKeyboardLayoutAnchor";
 
 enum class PanelEvent { None, Open, Closed };

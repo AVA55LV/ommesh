@@ -32,7 +32,7 @@ namespace net = symbian::api::connectivity;
 
 constexpr char kHost[] = "tile.openstreetmap.org";
 constexpr char kPreviewHost[] = "preview.ommesh.ru";
-constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.33 (+https://github.com/cm4ker/ommesh)";
+constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.38 (+https://github.com/cm4ker/ommesh)";
 constexpr int kMaximumTileBytes = 160 * 1024;
 constexpr std::size_t kNativeIoLimit = 32 * 1024;
 constexpr char kPng256Header[] =
@@ -220,6 +220,24 @@ TileHttpsResult failure(const absl::Status& status) {
     return result;
 }
 
+bool resolverError(const absl::Status& status) {
+    return status.message().find("Resolve TCP hostname:") == 0;
+}
+
+TileHttpsResult tileConnectFailure(const absl::Status& status) {
+    TileHttpsResult result;
+    if (resolverError(status)) {
+        result.error = absl::IsDeadlineExceeded(status)
+            ? QString::fromUtf8("DNS: нет ответа для OpenStreetMap")
+            : QString::fromUtf8("DNS: не найден адрес OpenStreetMap");
+    } else if (absl::IsDeadlineExceeded(status)) {
+        result.error = QString::fromUtf8("Тайм-аут соединения с OpenStreetMap");
+    } else {
+        return failure(status);
+    }
+    return result;
+}
+
 QByteArray header(const http::Headers& headers, const char* name) {
     const auto value = http::GetHeader(headers, name);
     return value ? QByteArray(value->data(), static_cast<int>(value->size())) : QByteArray();
@@ -246,10 +264,19 @@ TileHttpsResult fetchOsmTile(const TileHttpsRequest& request) {
     if (cancelled(request.cancelled))
         return failure(absl::CancelledError("Tile request cancelled"));
 
-    const auto deadline = absl::Now() + absl::Seconds(19);
-    auto tcp = net::TcpClient::ConnectHost(kHost, 443, absl::Now() + absl::Seconds(8));
+    const auto start = absl::Now();
+    const auto deadline = start + absl::Seconds(19);
+    const auto tcpDeadline = start + absl::Seconds(8);
+    auto tcp = net::TcpClient::ConnectHost(kHost, 443, tcpDeadline);
+    if (!tcp.ok() && absl::IsNotFound(tcp.status()) && resolverError(tcp.status()) &&
+            !cancelled(request.cancelled) && tcpDeadline - absl::Now() >= absl::Milliseconds(500)) {
+        // Symbian may briefly return KErrNotFound when the bearer first starts.
+        absl::SleepFor(absl::Milliseconds(250));
+        if (!cancelled(request.cancelled))
+            tcp = net::TcpClient::ConnectHost(kHost, 443, tcpDeadline);
+    }
     if (!tcp.ok())
-        return failure(tcp.status());
+        return tileConnectFailure(tcp.status());
     auto tls = std::make_unique<TileTlsStream>(std::move(*tcp), request.cancelled);
     auto status = tls->open(kHost, kTileRoots, sizeof(kTileRoots), request.allowUntrustedCa, deadline);
     if (!status.ok())
