@@ -1686,6 +1686,16 @@ void ClientWindow::applyNavigation() {
         connect(settings, SIGNAL(saved()), this, SLOT(mapSettingsSaved()));
         QScrollArea* scroll = makeTouchScrollArea(this, settings);
         scroll->setObjectName(QLatin1String("mapSettingsScroll"));
+        const QColor canvas = Appearance::paletteFor(this).canvas;
+        for (QWidget* background : {scroll->widget(), scroll->viewport()}) {
+            background->setObjectName(QLatin1String("pane"));
+            background->setAttribute(Qt::WA_StyledBackground);
+            QPalette palette = background->palette();
+            palette.setColor(QPalette::Window, canvas);
+            palette.setColor(QPalette::Base, canvas);
+            background->setPalette(palette);
+            background->setAutoFillBackground(true);
+        }
         showDetailPage(scroll, ui("Интернет-карта"));
         return;
     }
