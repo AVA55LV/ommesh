@@ -12,6 +12,7 @@
 #include <QtCore/QFile>
 #include <QtCore/QFileInfo>
 #include <QtCore/QPointer>
+#include <QtCore/QRegExp>
 #include <QtCore/QSettings>
 #include <QtCore/QTimer>
 #include <QtGui/QHBoxLayout>
@@ -77,10 +78,22 @@ QByteArray readCopy(const QString& path, int maximum, QString& error) {
     return content;
 }
 
-QString fileName(bool onlyKey) {
-    return QLatin1String(onlyKey ? "ommesh-key-" : "ommesh-backup-") +
-           QDateTime::currentDateTime().toString(QLatin1String("yyyyMMdd-HHmmss-zzz")) +
-           QLatin1String(onlyKey ? ".txt" : ".json");
+QString fileName(bool onlyKey, const QDir& directory, const std::string& radioName) {
+    const QDateTime now = QDateTime::currentDateTime();
+    const QLatin1String extension(".json");
+    if (!onlyKey)
+        return QLatin1String("ommesh-backup-") + now.toString(QLatin1String("yyyyMMdd-HHmmss-zzz")) + extension;
+
+    QString name = QString::fromUtf8(radioName.data(), static_cast<int>(radioName.size()));
+    name.replace(QRegExp(QLatin1String("[\\\\/:*?\"<>|\\s.\\x0000-\\x001f]+")), QLatin1String("-"));
+    name.remove(QRegExp(QLatin1String("^-+|-+$")));
+    if (name.isEmpty())
+        name = QLatin1String("radio");
+    const QString stem = QLatin1String("ommesh-key-") + name + QLatin1Char('-') +
+                         now.toString(QLatin1String("yyyy-MM-dd"));
+    if (!QFileInfo(directory.filePath(stem + extension)).exists())
+        return stem + extension;
+    return stem + QLatin1Char('-') + now.toString(QLatin1String("HHmmss-zzz")) + extension;
 }
 
 } // namespace
@@ -279,7 +292,8 @@ void RadioBackupPanel::choosePath(const QString& path) {
     if (operation == SaveRadio || operation == SaveKey) {
         s.directory = path;
         s.exporting = snapshot;
-        s.exportPath = QDir(path).filePath(fileName(operation == SaveKey));
+        const QDir directory(path);
+        s.exportPath = directory.filePath(fileName(operation == SaveKey, directory, snapshot->identity.name));
         const int request = s.client.nextConsoleRequestId();
         if (!s.client.requestRadioBackupKey(request, s.expectedTarget)) {
             s.exporting.reset();
