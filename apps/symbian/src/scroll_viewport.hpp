@@ -14,14 +14,16 @@ public:
     bool update(const QAbstractScrollArea& area) {
         if (!overlayVerticalBar_)
             return false;
-        const QScrollBar* bar = area.verticalScrollBar();
-        const auto policy = area.verticalScrollBarPolicy();
-        const bool reservesSpace = policy == Qt::ScrollBarAlwaysOn ||
-            (policy == Qt::ScrollBarAsNeeded && bar->minimum() < bar->maximum());
-        const int overlap = reservesSpace ? bar->sizeHint().width() : 0;
+        const int targetWidth = area.contentsRect().width() - 2 * horizontalInset_;
+        const int actualWidth = area.viewport()->width();
+        if (targetWidth < 1 || actualWidth < 1)
+            return false;
+        // Qt can update the bar range and viewport in separate layout steps.
+        // Account for the width reserved in the current geometry.
+        const int barWidth = area.verticalScrollBar()->sizeHint().width();
+        const int overlap = qBound(0, verticalBarOverlap_ + targetWidth - actualWidth, barWidth);
         if (overlap == verticalBarOverlap_)
             return false;
-        // Qt raises the bar above the viewport. Restore the width it reserved.
         verticalBarOverlap_ = overlap;
         return true;
     }

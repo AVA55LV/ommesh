@@ -1381,23 +1381,33 @@ MapSettingsPanel::MapSettingsPanel(QWidget* parent)
                                         "Масштаб Омска на линейке от 30 км до 30 м."), this);
     instructions->setTextFormat(Qt::PlainText);
     instructions->setWordWrap(true);
+    QSizePolicy instructionsSize = instructions->sizePolicy();
+    instructionsSize.setHorizontalPolicy(QSizePolicy::Ignored);
+    instructions->setSizePolicy(instructionsSize);
     layout->addWidget(instructions);
     auto* regionLayout = new QGridLayout;
     regionLayout->setContentsMargins(0, 0, 0, 0);
-    regionLayout->setSpacing(4);
+    regionLayout->setSpacing(6);
+    regionLayout->setColumnStretch(0, 1);
+    regionLayout->setColumnStretch(1, 1);
     const char* regionNames[] = {"mapRegionOmsk", "mapRegionOblast", "mapRegionSiberia", "mapRegionWorld"};
     for (int i = NodeMap::OmskCity; i <= NodeMap::World; ++i) {
         auto* button = new QPushButton(regionCaption(static_cast<NodeMap::OfflineRegion>(i)), this);
         button->setObjectName(QLatin1String(regionNames[i]));
-        button->setMinimumHeight(38);
+        button->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Fixed);
+        button->setMinimumHeight(44);
         button->setCheckable(true);
         regions_->addButton(button, i);
-        regionLayout->addWidget(button, 0, i);
+        const int position = i - NodeMap::OmskCity;
+        regionLayout->addWidget(button, position / 2, position % 2);
     }
     layout->addLayout(regionLayout);
     validation_->setObjectName(QLatin1String("mapValidation"));
     validation_->setTextFormat(Qt::PlainText);
     validation_->setWordWrap(true);
+    QSizePolicy validationSize = validation_->sizePolicy();
+    validationSize.setHorizontalPolicy(QSizePolicy::Ignored);
+    validation_->setSizePolicy(validationSize);
     layout->addWidget(validation_);
     auto* done = new QPushButton(ru("Готово"), this);
     done->setObjectName(QLatin1String("mapDone"));
