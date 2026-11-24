@@ -28,7 +28,7 @@
    if (relocs.info >= sections.size() || relocs.info == 0 ||
        relocs.flags != 0x42 || relocs.entry_size != 8 || relocs.size % 8 ||
 -      relocs.size == 0 || relocs.size > 1024 * 8) {
-+      relocs.size == 0 || relocs.size > 1152 * 8) {
++      relocs.size == 0 || relocs.size > 1280 * 8) {
      return absl::DataLossError("Invalid import relocation table");
    }
    result.got_index = relocs.info;
@@ -108,7 +108,17 @@
        }
 --- a/cpp/symbian/e32/e32.cc
 +++ b/cpp/symbian/e32/e32.cc
-@@ -276,7 +276,8 @@
+@@ -35,7 +35,8 @@
+ constexpr uint32_t kCrcInitializer = 0xc90fdaa2;
+ constexpr uint32_t kMaxImageSize = 0x0fffffff;
+ constexpr uint32_t kSupportedCapabilities =
+-    (1U << 12) | (1U << 13) | (1U << 15) | (1U << 16) | (1U << 19);
++    (1U << 12) | (1U << 13) | (1U << 15) | (1U << 16) | (1U << 17) |
++    (1U << 19);
+ 
+ // Symbian CRC32 uses reflected polynomial 0xedb88320, initial zero and no
+ // final complement. UID CRC16 uses polynomial 0x1021 and initial zero.
+@@ -276,7 +277,8 @@
                    imports->code_function_pointers.find(location);
                code_pointer != imports->code_function_pointers.end()) {
              if (symbol_type != 2 || code_pointer->second != *name ||

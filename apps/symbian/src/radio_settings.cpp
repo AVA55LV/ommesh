@@ -7,6 +7,7 @@
 #include "native_echo.hpp"
 #include "native_vibration.hpp"
 #include "node_map.hpp"
+#include "phone_location.hpp"
 #include "settings_attachments.hpp"
 #include "settings_backup.hpp"
 #include "settings_icons.hpp"
@@ -16,8 +17,8 @@
 #include "window.hpp"
 
 #include <QtCore/QDateTime>
+#include <QtCore/QEvent>
 #include <QtCore/QFile>
-#include <QtCore/QDateTime>
 #include <QtCore/QSettings>
 #include <QtCore/QTimer>
 #include <QtCore/QVariant>
@@ -473,9 +474,11 @@ void AppearancePanel::chooseChatBackground() {
 }
 
 RadioSettingsPanel::RadioSettingsPanel(Client& client, QWidget* parent)
-    : QWidget(parent), client_(client), vibration_(new NativeVibration) {
+    : QWidget(parent), client_(client), vibration_(new NativeVibration), phoneLocation_(new PhoneLocation(client_, this)) {
     vibrationRetryTimer_.setSingleShot(true);
     connect(&vibrationRetryTimer_, SIGNAL(timeout()), this, SLOT(retryTestVibration()));
+    connect(phoneLocation_, SIGNAL(changed()), this, SLOT(updatePrivacyControls()));
+    connect(phoneLocation_, SIGNAL(positionWritten(bool)), this, SLOT(phonePositionWritten(bool)));
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(14);
@@ -741,12 +744,6 @@ std::optional<qint32> coordinate(const QLineEdit* field, int limit) {
     return static_cast<qint32>(qRound64(value * 1000000.0));
 }
 
-void appendCoordinate(meshcore::Bytes& command, qint32 value) {
-    const auto bits = static_cast<quint32>(value);
-    for (unsigned shift = 0; shift < 32; shift += 8)
-        command.push_back(static_cast<std::uint8_t>(bits >> shift));
-}
-
 template <class Field>
 Field* privacyField(QVBoxLayout* group, const char* text, const char* name) {
     auto* field = new Field(group->parentWidget());
@@ -761,9 +758,15 @@ Field* privacyField(QVBoxLayout* group, const char* text, const char* name) {
 
 void RadioSettingsPanel::showLocation() {
     auto* page = new QWidget(this);
+    privacyPhonePage_ = page;
+    page->installEventFilter(this);
     auto* layout = new QVBoxLayout(page);
     layout->setContentsMargins(0, 0, 0, 0);
     auto* coords = settingsGroup(layout, page, ui("МЕСТОПОЛОЖЕНИЕ"));
+    privacyPhoneFollow_ = addSettingsRow(coords, "Брать с телефона", "privacyPhoneFollow", SettingGlyph::Map, false,
+        ui("При смещении больше 50 м. Не чаще раза в 5 минут, пока приложение на экране."));
+    privacyPhoneFollow_->setCheckable(true);
+    connect(privacyPhoneFollow_.data(), SIGNAL(clicked(bool)), this, SLOT(setPhoneFollow(bool)));
     privacyLatitude_ = privacyField<QLineEdit>(coords, "Широта", "privacyLatitude");
     privacyLongitude_ = privacyField<QLineEdit>(coords, "Долгота", "privacyLongitude");
     for (QLineEdit* field : {privacyLatitude_.data(), privacyLongitude_.data()}) {
@@ -771,6 +774,11 @@ void RadioSettingsPanel::showLocation() {
         field->setInputMethodHints(Qt::ImhFormattedNumbersOnly);
         connect(field, SIGNAL(textChanged(QString)), this, SLOT(updatePrivacyControls()));
     }
+    privacyPhoneLocate_ = addSettingsRow(coords, "Взять координаты телефона", "privacyPhoneLocate", SettingGlyph::Map, false);
+    connect(privacyPhoneLocate_.data(), SIGNAL(clicked()), this, SLOT(locatePhone()));
+    privacyPhoneFeedback_ = addText(coords, QString(), coords->parentWidget());
+    privacyPhoneFeedback_->setObjectName(QLatin1String("privacyPhoneFeedback"));
+    privacyPhoneFeedback_->setContentsMargins(12, 4, 12, 6);
     privacyShare_ = addSettingsRow(coords, "Место на карте у других", "privacyShare", SettingGlyph::Map, false);
     privacyShare_->setCheckable(true);
     connect(privacyShare_.data(), SIGNAL(toggled(bool)), this, SLOT(updatePrivacyControls()));
@@ -795,6 +803,41 @@ void RadioSettingsPanel::showLocation() {
     emit detailRequested(settingsScroll(this, page), ui("Приватность"));
 }
 
+bool RadioSettingsPanel::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == privacyPhonePage_.data() && event->type() == QEvent::Hide)
+        phoneLocation_->cancelUserRequest();
+    return QWidget::eventFilter(watched, event);
+}
+
+void RadioSettingsPanel::locatePhone() { phoneLocation_->locate(); }
+
+void RadioSettingsPanel::setPhoneFollow(bool enabled) {
+    phoneLocation_->setFollowing(enabled);
+    updatePrivacyControls();
+}
+
+void RadioSettingsPanel::displayPrivacyPosition(qint32 latitude, qint32 longitude) {
+    displayedLatitude_ = latitude;
+    displayedLongitude_ = longitude;
+    const bool latitudeBlocked = privacyLatitude_->blockSignals(true);
+    const bool longitudeBlocked = privacyLongitude_->blockSignals(true);
+    privacyLatitude_->setText(QString::number(latitude / 1000000.0, 'f', 6));
+    privacyLongitude_->setText(QString::number(longitude / 1000000.0, 'f', 6));
+    privacyLatitude_->blockSignals(latitudeBlocked);
+    privacyLongitude_->blockSignals(longitudeBlocked);
+}
+
+void RadioSettingsPanel::phonePositionWritten(bool manual) {
+    if (!privacySave_ || !privacyLatitude_ || !privacyLongitude_ || privacyRadioKey_ != client_.selfNode().publicKey)
+        return;
+    if (manual || (coordinate(privacyLatitude_, 90) == displayedLatitude_ &&
+                   coordinate(privacyLongitude_, 180) == displayedLongitude_)) {
+        const auto& identity = client_.radioIdentity();
+        displayPrivacyPosition(identity.latitude, identity.longitude);
+    }
+    updatePrivacyControls();
+}
+
 void RadioSettingsPanel::updatePrivacyControls() {
     if (!privacySave_)
         return;
@@ -806,12 +849,10 @@ void RadioSettingsPanel::updatePrivacyControls() {
     const QString key = client_.selfNode().publicKey;
     if (online && privacyRadioKey_ != key) {
         privacyRadioKey_ = key;
-        QWidget* fields[] = {privacyLatitude_.data(), privacyLongitude_.data(), privacyShare_.data(),
-                             privacyBase_.data(), privacySensors_.data()};
+        QWidget* fields[] = {privacyShare_.data(), privacyBase_.data(), privacySensors_.data()};
         for (QWidget* field : fields)
             field->blockSignals(true);
-        privacyLatitude_->setText(QString::number(identity.latitude / 1000000.0, 'f', 6));
-        privacyLongitude_->setText(QString::number(identity.longitude / 1000000.0, 'f', 6));
+        displayPrivacyPosition(identity.latitude, identity.longitude);
         privacyShare_->setChecked(identity.advertLocPolicy != 0);
         privacyBase_->setCurrentIndex(qMin<int>(2, identity.telemetryModes & 3));
         privacySensors_->clear();
@@ -838,7 +879,19 @@ void RadioSettingsPanel::updatePrivacyControls() {
     const bool changedAccess = supported && (privacyShare_->isChecked() != (identity.advertLocPolicy != 0) ||
         base != qMin<int>(2, identity.telemetryModes & 3) ||
         privacySensors_->currentIndex() != qMin<int>(base, (identity.telemetryModes >> 4) & 3));
-    const bool idle = online && !privacyRequest_;
+    const bool phonePending = phoneLocation_->userRequestPending();
+    const bool idle = online && !privacyRequest_ && !phonePending;
+    const bool usePhone = phoneLocation_->available() && !privacyRequest_;
+    const bool following = phoneLocation_->following();
+    const bool ownGps = phoneLocation_->radioGpsEnabled();
+    privacyPhoneFollow_->setChecked(following);
+    showToggle(privacyPhoneFollow_, "Брать с телефона", following);
+    privacyPhoneFollow_->setEnabled(usePhone && (following || (!phonePending && !ownGps)));
+    privacyPhoneLocate_->setEnabled(usePhone && !phonePending);
+    const QString phoneFeedback = ownGps && phoneLocation_->message().isEmpty()
+        ? ui("Нода использует свой GPS.") : phoneLocation_->message();
+    privacyPhoneFeedback_->setText(phoneFeedback);
+    privacyPhoneFeedback_->setVisible(!phoneFeedback.isEmpty());
     privacyLatitude_->setEnabled(idle);
     privacyLongitude_->setEnabled(idle);
     privacyShare_->setEnabled(idle && supported);
@@ -878,12 +931,8 @@ void RadioSettingsPanel::applyPrivacySettings() {
         if (modes != identity.telemetryModes || visibility != identity.advertLocPolicy)
             commands.push_back({38, identity.manualAddContacts, modes, visibility, identity.multiAcks});
     }
-    if (*latitude != identity.latitude || *longitude != identity.longitude) {
-        meshcore::Bytes command{14};
-        appendCoordinate(command, *latitude);
-        appendCoordinate(command, *longitude);
-        commands.push_back(command);
-    }
+    if (*latitude != identity.latitude || *longitude != identity.longitude)
+        commands.push_back(meshcore::setLocation(*latitude, *longitude));
     const int request = client_.nextConsoleRequestId();
     if (!commands.empty() && client_.applyRadioSettings(request, commands)) {
         privacyRequest_ = request;

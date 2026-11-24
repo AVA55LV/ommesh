@@ -4,14 +4,14 @@ kind = "e32-import"
 architecture = "armv6"
 cmake_preset = "symbian-pic"
 uid3 = 0xe78af613
-capabilities = ["NetworkServices"]
+capabilities = ["NetworkServices", "Location"]
 
 [package]
 uid = 0xe78af614
 name = "OMMesh Belle"
 vendor = "OMMesh Belle port"
 executable_name = "ommesh_belle.exe"
-version = [0, 2, 25]
+version = [0, 2, 26]
 
 [application]
 caption = "OMMesh Belle"

@@ -12,6 +12,7 @@ class Client;
 class ChatAppearancePreview;
 class NativeVibration;
 class NodeMap;
+class PhoneLocation;
 class QButtonGroup;
 class QLabel;
 class QComboBox;
@@ -43,6 +44,9 @@ signals:
     void appearanceChanged(int theme, int chatTextSize);
     void connectionSettingsRequested();
     void exitRequested();
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private slots:
     void setReconnect(bool enabled);
@@ -81,6 +85,9 @@ private slots:
     void refreshBatteryReadout();
     void updatePrivacyControls();
     void applyPrivacySettings();
+    void locatePhone();
+    void setPhoneFollow(bool enabled);
+    void phonePositionWritten(bool manual);
     void showTrustedContacts();
     void updateTrustedContactSelection();
     void setSelectedTrustedContact();
@@ -95,9 +102,11 @@ private:
     void openChannels(bool adding);
     void updateBatteryPage();
     void refreshTrustedContacts();
+    void displayPrivacyPosition(qint32 latitude, qint32 longitude);
 
     Client& client_;
     NativeVibration* vibration_;
+    PhoneLocation* phoneLocation_;
     QPointer<QPushButton> demo_;
     QPushButton* nameRow_ = nullptr;
     QPushButton* frequencyRow_ = nullptr;
@@ -124,6 +133,10 @@ private:
     QPointer<QLabel> batteryState_;
     QPointer<QPushButton> batteryRefresh_;
     QPointer<QPushButton> batteryPrivacy_;
+    QPointer<QWidget> privacyPhonePage_;
+    QPointer<QPushButton> privacyPhoneFollow_;
+    QPointer<QPushButton> privacyPhoneLocate_;
+    QPointer<QLabel> privacyPhoneFeedback_;
     QPointer<QLineEdit> privacyLatitude_;
     QPointer<QLineEdit> privacyLongitude_;
     QPointer<QPushButton> privacyShare_;
@@ -136,6 +149,8 @@ private:
     QPointer<QPushButton> trustedChange_;
     QPointer<QLabel> trustedFeedback_;
     QString privacyRadioKey_;
+    qint32 displayedLatitude_ = 0;
+    qint32 displayedLongitude_ = 0;
     int privacyRequest_ = 0;
     int trustRequest_ = 0;
     QElapsedTimer lastNotification_;

@@ -122,6 +122,7 @@ Bytes appStart();
 Bytes getContacts();
 Bytes getChannel(std::uint8_t index);
 Bytes setChannel(std::uint8_t index, std::string_view name, const std::array<std::uint8_t, 16>& key);
+Bytes setLocation(std::int32_t latitude, std::int32_t longitude);
 Bytes syncNext();
 Bytes sendDirect(const Prefix& recipient, std::string_view text, std::uint32_t timestamp, std::uint8_t attempt = 0);
 Bytes sendChannel(std::uint8_t index, std::string_view text, std::uint32_t timestamp, std::size_t senderNameBytes);

@@ -121,6 +121,8 @@ struct RadioReadings {
     quint32 capturedAt = 0;
 };
 
+enum class RadioGpsState { Unknown, Disabled, Enabled, Unsupported };
+
 struct NodeRouteTraceResult {
     int roundTripMs;
     QVector<int> snrQuarters;
@@ -173,6 +175,7 @@ public:
     bool advertise();
     bool requestBattery();
     bool requestRadioReadings();
+    bool requestRadioGps();
     bool applyRadioSettings(int requestId, const std::vector<meshcore::Bytes>& commands,
                             bool readBackIdentity = true);
     bool restartRadio(bool factoryReset);
@@ -224,6 +227,8 @@ public:
     int radioPathHashMode() const;
     const RadioReadings& radioReadings() const;
     bool radioReadingsPending() const;
+    RadioGpsState radioGpsState() const;
+    quint64 radioSessionToken() const;
     QString batteryInfo() const;
     int batteryMillivolts() const;
     int lastBatteryMillivolts() const;
@@ -262,7 +267,8 @@ private slots:
 private:
     enum class Wait { None, Device, Identity, Contacts, Channel, Sync, Send, ResetPath, Advert, Battery,
                       Console, SetChannel, Reaction, RadioStats, OwnTelemetry, RadioSetting,
-                      RadioSettingIdentity, RestartRadio, RadioBackupKey, RadioBackupWrite, RadioBackupReboot };
+                      RadioSettingIdentity, RestartRadio, RadioBackupKey, RadioBackupWrite, RadioBackupReboot,
+                      RadioGps };
     struct RadioBackupTransaction {
         int id = 0;
         QString target;
@@ -350,6 +356,8 @@ private:
     void completeRadioBackupKey(int result, const QByteArray& key, const QString& text);
     void completeRadioBackup(const QString& confirmedPublicKey, const QString& error = {});
     void advanceRadioReadings();
+    void finishRadioGps(RadioGpsState state);
+    void resetRadioGpsSession();
     void frameReceived(const meshcore::Bytes& frame);
     void openLink(bool retrying);
     void loadNextChannel();
@@ -439,6 +447,9 @@ private:
     bool radioPathHashModeKnown_ = false;
     RadioReadings radioReadings_;
     RadioReadings nextRadioReadings_;
+    RadioGpsState radioGpsState_ = RadioGpsState::Unknown;
+    quint64 radioSessionToken_ = 0;
+    bool radioGpsNeeded_ = false;
     std::optional<RadioSettingsTransaction> radioSettingsTransaction_;
     std::optional<RadioBackupTransaction> radioBackupTransaction_;
     int radioBackupKeyRequest_ = 0;

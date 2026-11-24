@@ -48,6 +48,9 @@ constexpr qint64 kEchoLifetime = 900000;
 constexpr std::uint8_t kTrustedContactFlags = 0x0e;
 constexpr std::uint8_t kStatsReply = 24;
 constexpr std::uint8_t kTelemetryReply = 0x8b;
+constexpr std::uint8_t kGetCustomVars = 40;
+constexpr std::uint8_t kCustomVarsReply = 21;
+constexpr qint64 kRadioGpsReplyTimeout = 2500;
 constexpr int kMissingSnr = std::numeric_limits<int>::min();
 constexpr int kMessageReactionLimit = 32;
 constexpr std::size_t kDeferredReactionLimit = 64;
@@ -65,6 +68,25 @@ template <class ByteArray>
 QByteArray rawBytes(const ByteArray& bytes) {
     return QByteArray(reinterpret_cast<const char*>(bytes.data()),
                       static_cast<int>(bytes.size()));
+}
+
+RadioGpsState parseRadioGps(const meshcore::Bytes& frame) {
+    auto state = RadioGpsState::Unsupported;
+    std::string_view rest(reinterpret_cast<const char*>(frame.data() + 1), frame.size() - 1);
+    while (!rest.empty()) {
+        const auto separator = rest.find(',');
+        const auto variable = rest.substr(0, separator);
+        if (variable == "gps:1")
+            return RadioGpsState::Enabled;
+        if (variable == "gps:0" && state == RadioGpsState::Unsupported)
+            state = RadioGpsState::Disabled;
+        else if (variable.starts_with("gps:") && variable != "gps:0")
+            state = RadioGpsState::Unknown;
+        if (separator == std::string_view::npos)
+            break;
+        rest.remove_prefix(separator + 1);
+    }
+    return state;
 }
 
 void appendWireU32(meshcore::Bytes& bytes, quint32 value) {
@@ -387,6 +409,7 @@ void Client::connectTo(const QString& host, quint16 port) {
 }
 
 void Client::openLink(bool retrying) {
+    resetRadioGpsSession();
     reconnectAt_ = 0;
     retryingConnection_ = retrying;
     directReceived_ = channelReceived_ = publicReceived_ = dataReceived_ = groupHeard_ = 0;
@@ -523,6 +546,10 @@ std::optional<bool> Client::radioRepeatEnabled() const { return ready_ ? radioRe
 int Client::radioPathHashMode() const { return ready_ && radioPathHashModeKnown_ ? pathHashMode_ : -1; }
 const RadioReadings& Client::radioReadings() const { return radioReadings_; }
 bool Client::radioReadingsPending() const { return radioReadingsStage_ >= 0; }
+RadioGpsState Client::radioGpsState() const {
+    return ready_ && !closing_ ? radioGpsState_ : RadioGpsState::Unknown;
+}
+quint64 Client::radioSessionToken() const { return radioSessionToken_; }
 QString Client::batteryInfo() const { return battery_.isEmpty() ? russian("Показания ещё не запрошены.") : battery_; }
 int Client::batteryMillivolts() const { return batteryMillivolts_; }
 int Client::lastBatteryMillivolts() const { return lastBatteryMillivolts_; }
@@ -1072,6 +1099,16 @@ bool Client::requestRadioReadings() {
     return true;
 }
 
+bool Client::requestRadioGps() {
+    if (!ready_ || closing_ || !pendingSocketFailure_.isEmpty())
+        return false;
+    if (radioGpsState_ == RadioGpsState::Unknown && wait_ != Wait::RadioGps) {
+        radioGpsNeeded_ = true;
+        proceed();
+    }
+    return true;
+}
+
 bool Client::applyRadioSettings(int requestId, const std::vector<meshcore::Bytes>& commands,
                                bool readBackIdentity) {
     if (!ready_ || closing_ || wait_ == Wait::RestartRadio || radioSettingsTransaction_ ||
@@ -1608,6 +1645,10 @@ void Client::tick() {
     }
     if (timeout_ > 0 && now >= timeout_) {
         traceConnection("TCP: timeout while waiting for stage", static_cast<int>(wait_));
+        if (wait_ == Wait::RadioGps) {
+            finishRadioGps(RadioGpsState::Unknown);
+            return;
+        }
         if (wait_ == Wait::OwnTelemetry) {
             wait_ = Wait::None;
             timeout_ = 0;
@@ -1806,6 +1847,8 @@ void Client::readRadioBackupReply(const meshcore::Bytes& frame) {
 }
 
 void Client::updateRadioIdentity(const meshcore::SelfInfo& device) {
+    if (self_.key != device.key)
+        resetRadioGpsSession();
     radioName_ = fromWire(device.name);
     radioNameBytes_ = device.name.size();
     self_ = device;
@@ -1898,6 +1941,20 @@ void Client::advanceRadioReadings() {
         radioReadings_ = nextRadioReadings_;
         status_ = hasReadings ? russian("Показания рации обновлены") : russian("Рация не вернула показания");
     }
+}
+
+void Client::finishRadioGps(RadioGpsState state) {
+    radioGpsState_ = state;
+    wait_ = Wait::None;
+    timeout_ = 0;
+    proceed();
+    emit changed();
+}
+
+void Client::resetRadioGpsSession() {
+    ++radioSessionToken_;
+    radioGpsState_ = RadioGpsState::Unknown;
+    radioGpsNeeded_ = false;
 }
 
 void Client::frameReceived(const meshcore::Bytes& frame) {
@@ -2163,6 +2220,14 @@ void Client::frameReceived(const meshcore::Bytes& frame) {
             emit changed();
         }
         break;
+    case Wait::RadioGps:
+        if (code == kCustomVarsReply) {
+            finishRadioGps(parseRadioGps(frame));
+        } else if (code == response::Error || code == kCommandDisabled) {
+            const bool unsupported = code == kCommandDisabled || frame.size() == 1 || frame[1] == 1;
+            finishRadioGps(unsupported ? RadioGpsState::Unsupported : RadioGpsState::Unknown);
+        }
+        break;
     case Wait::RadioSetting:
     case Wait::RadioSettingIdentity:
         readRadioSettingsReply(frame);
@@ -2356,6 +2421,10 @@ void Client::proceed() {
     } else if (radioReadingsStage_ == 3) {
         if (write({39, 0, 0, 0}, Wait::OwnTelemetry))
             timeout_ = clock_.elapsed() + 2500;
+    } else if (radioGpsNeeded_) {
+        radioGpsNeeded_ = false;
+        if (write({kGetCustomVars}, Wait::RadioGps))
+            timeout_ = clock_.elapsed() + kRadioGpsReplyTimeout;
     } else if (reactionRequest_) {
         startReaction();
     } else if (retryExpired() || sendNext()) {
@@ -2805,6 +2874,7 @@ void Client::finish(const QString& status, bool retryable) {
     if (closing_)
         return;
     closing_ = true;
+    resetRadioGpsSession();
     pendingSocketFailure_.clear();
     retrySocketFailure_ = false;
     if (!pendingId_.isEmpty())

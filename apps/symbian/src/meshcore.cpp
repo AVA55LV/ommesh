@@ -135,6 +135,17 @@ Bytes getChannel(std::uint8_t index)
     return {0x1f, index};
 }
 
+Bytes setLocation(std::int32_t latitude, std::int32_t longitude)
+{
+    Bytes command{14};
+    for (const auto coordinate : {latitude, longitude}) {
+        const auto bits = static_cast<std::uint32_t>(coordinate);
+        for (unsigned shift = 0; shift < 32; shift += 8)
+            command.push_back(static_cast<std::uint8_t>(bits >> shift));
+    }
+    return command;
+}
+
 Bytes setChannel(std::uint8_t index, std::string_view name, const std::array<std::uint8_t, 16>& key)
 {
     if (name.size() >= 32 || name.find('\0') != std::string_view::npos)

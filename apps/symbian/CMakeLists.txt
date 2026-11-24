@@ -39,7 +39,7 @@ add_custom_command(
 )
 
 set(moc_sources)
-foreach(class IN ITEMS client window chat_features node_map radio_settings native_wlan link_preview network_filters network_node_card network_node_management settings_attachments settings_backup settings_radio_backup settings_radio_editor settings_radio_tools)
+foreach(class IN ITEMS client window chat_features node_map radio_settings native_wlan native_location phone_location link_preview network_filters network_node_card network_node_management settings_attachments settings_backup settings_radio_backup settings_radio_editor settings_radio_tools)
   set(header "${CMAKE_CURRENT_SOURCE_DIR}/src/${class}.hpp")
   set(moc_source "${CMAKE_CURRENT_BINARY_DIR}/moc_${class}.cpp")
   add_custom_command(
@@ -76,6 +76,8 @@ symbian_add_executable(ommesh_belle SOURCES
   src/settings_radio_tools.cpp
   src/native_vibration.cpp
   src/native_wlan.cpp
+  src/native_location.cpp
+  src/phone_location.cpp
   src/native_tile_https.cpp
   src/native_allocator.cpp
   src/native_echo.cpp
@@ -132,9 +134,10 @@ target_link_libraries(ommesh_belle PRIVATE
   Symbian::Tls
   Symbian::Vibra
   "${SYMBIAN_SDK_PREFIX}/proxies/efsrv/efsrv.dso"
+  "${SYMBIAN_SDK_PREFIX}/proxies/lbs/lbs.dso"
 )
 
-symbian_enable_native_leaves(ommesh_belle SOURCES src/main.cpp src/native_vibration.cpp)
+symbian_enable_native_leaves(ommesh_belle SOURCES src/main.cpp src/native_vibration.cpp src/native_location.cpp)
 set_property(SOURCE src/main.cpp src/native_vibration.cpp APPEND PROPERTY COMPILE_OPTIONS -fno-pic -fno-pie)
 
 # Immutable PIC vtables contain loader imports. Put them in the code image
@@ -164,8 +167,8 @@ function(ommesh_place_vtables_in_code)
 endfunction()
 cmake_language(DEFER CALL ommesh_place_vtables_in_code)
 
-# E32 capability bit 13 is NetworkServices. Keep the package manifest in sync.
-symbian_publish_executable(ommesh_belle UID3 0xe78af613 CAPABILITIES 0x2000)
+# E32 capability bits 13 (NetworkServices) and 17 (Location).
+symbian_publish_executable(ommesh_belle UID3 0xe78af613 CAPABILITIES 0x22000)
 
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 set(belle_executable "${CMAKE_CURRENT_BINARY_DIR}/belle/ommesh_belle.exe")
