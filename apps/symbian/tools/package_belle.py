@@ -9,7 +9,8 @@ import tempfile
 import tomllib
 from pathlib import Path
 
-from symbian.packaging.registration import compile_registration
+from symbian.packaging.registration import _LANGUAGES, _resource, compile_registration
+from symbian.project.sdk import project_sdk
 
 from prepare_belle_executable import (
     E32_EXE_UID,
@@ -21,6 +22,62 @@ from prepare_belle_executable import (
 )
 
 NOKIA_BELLE_PLATFORM_UID = 0x2003A678
+
+
+def compile_bitmap_registration(
+    project: Path, application: dict, executable_name: str, uid3: int
+) -> list[tuple[str, bytes]]:
+    captions = dict(application)
+    icon_path = project / captions.pop("icon", "")
+    if icon_path.suffix.lower() != ".mbm" or not icon_path.resolve().is_relative_to(project):
+        raise ValueError("application.icon must point to a project-relative MBM file")
+
+    icon = icon_path.read_bytes()
+    uid1, uid2, uid3_bitmap, uid_crc, directory = struct.unpack_from("<5I", icon)
+    if (uid1, uid2, uid3_bitmap) != (0x10000037, 0x10000042, 0) or uid_crc != uid_checksum(icon):
+        raise ValueError("Invalid launcher MBM file store")
+    count, color, mask = struct.unpack_from("<3I", icon, directory)
+    if count != 2 or not 20 <= color < mask < directory or directory + 12 != len(icon):
+        raise ValueError("Launcher MBM must contain one bitmap and its mask")
+    image = struct.unpack_from("<10I", icon, color)
+    transparency = struct.unpack_from("<10I", icon, mask)
+    if (
+        image[:4] != (40 + 64 * 64 * 3, 40, 64, 64)
+        or transparency[:4] != (40 + 64 * 64, 40, 64, 64)
+        or image[6:] != (24, 1, 0, 0) or transparency[6:] != (8, 0, 0, 0)
+        or color + image[0] != mask or mask + transparency[0] != directory
+    ):
+        raise ValueError("Launcher MBM requires a 64px color bitmap and grayscale mask")
+
+    # Reuse the SDK's registration UID and locale validation. Its standard icon
+    # builder only emits vector MIFs, so compile CAPTION_AND_ICON_INFO for MBM.
+    sdk = project_sdk(project)
+    registration, _ = compile_registration(project, captions, executable_name, uid3, sdk=sdk)
+    stem = Path(executable_name).stem
+    assets = [registration[0]]
+    locales = {0: captions}
+    locales.update({_LANGUAGES[tag]: text for tag, text in captions.get("localizations", {}).items()})
+    with tempfile.TemporaryDirectory(prefix="ommesh-bitmap-registration-") as temporary:
+        for number, text in sorted(locales.items()):
+            source = (
+                "CHARACTER_SET UTF8\n"
+                "#include <AppInfo.rh>\n"
+                "RESOURCE LOCALISABLE_APP_INFO\n"
+                "{\n"
+                f'  short_caption = "{text["short_caption"]}";\n'
+                "  caption_and_icon = CAPTION_AND_ICON_INFO\n"
+                "  {\n"
+                f'    caption = "{text["caption"]}";\n'
+                "    number_of_icons = 1;\n"
+                f'    icon_file = "\\\\resource\\\\apps\\\\{stem}.mbm";\n'
+                "  };\n"
+                "}\n"
+            )
+            extension = "rsc" if number == 0 else f"r{number:02d}"
+            target = f"!:\\resource\\apps\\{stem}_loc.{extension}"
+            assets.append((target, _resource(sdk, Path(temporary), f"loc{number:02d}", source)))
+    assets.append((f"!:\\resource\\apps\\{stem}.mbm", icon))
+    return assets
 
 
 def create_package(args: argparse.Namespace) -> None:
@@ -45,7 +102,7 @@ def create_package(args: argparse.Namespace) -> None:
     name, vendor = package["name"], package["vendor"]
     major, minor, build = package["version"]
     executable_name = package["executable_name"]
-    assets, _ = compile_registration(project, manifest["application"], executable_name, uid3)
+    assets = compile_bitmap_registration(project, manifest["application"], executable_name, uid3)
     files = [(f"!:\\sys\\bin\\{executable_name}", executable), *assets]
 
     with tempfile.TemporaryDirectory(prefix="ommesh-belle-") as temporary:

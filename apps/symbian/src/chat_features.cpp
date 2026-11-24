@@ -29,6 +29,7 @@
 #include <QtGui/QImage>
 #include <QtGui/QKeyEvent>
 #include <QtGui/QLabel>
+#include <QtGui/QLineEdit>
 #include <QtGui/QMenu>
 #include <QtGui/QMessageBox>
 #include <QtGui/QMouseEvent>
@@ -39,6 +40,7 @@
 #include <QtGui/QPushButton>
 #include <QtGui/QResizeEvent>
 #include <QtGui/QScrollBar>
+#include <QtGui/QShortcut>
 #include <QtGui/QStackedWidget>
 #include <QtGui/QTabBar>
 #include <QtGui/QTextBlock>
@@ -1104,6 +1106,8 @@ public:
         } else {
             scroll->setValue(anchored);
         }
+        if (!owner_->searchInput_->text().trimmed().isEmpty())
+            owner_->findMessage(ChatView::SearchStep::Refresh);
         viewport()->update();
     }
 
@@ -1480,13 +1484,19 @@ ChatView::ChatView(QWidget* parent)
     QHBoxLayout* top = new QHBoxLayout;
     top->setSpacing(7);
     QPushButton* back = makeButton(ui("Чаты"), this, "chatBack");
-    QPushButton* options = makeButton(ui("⋯"), this, "chatOptionsButton");
-    options->setProperty("accessibleName", ui("Действия чата"));
-    options->setFixedWidth(44);
-    QMenu* chatMenu = new QMenu(options);
+    optionsButton_ = makeButton(QString(), this, "chatOptionsButton");
+    optionsButton_->setProperty("accessibleName", ui("Действия чата"));
+    optionsButton_->setFixedWidth(42);
+    optionsButton_->setIconSize(QSize(24, 24));
+    QMenu* chatMenu = new QMenu(optionsButton_);
     chatMenu->setObjectName(QLatin1String("chatOptions"));
     pinAction_ = chatMenu->addAction(ui("Закрепить чат"));
-    options->setMenu(chatMenu);
+    optionsButton_->setMenu(chatMenu);
+    searchButton_ = makeButton(QString(), this, "chatMessageSearchButton");
+    searchButton_->setProperty("accessibleName", ui("Поиск по сообщениям"));
+    searchButton_->setCheckable(true);
+    searchButton_->setFixedWidth(44);
+    searchButton_->setIconSize(QSize(24, 24));
     QVBoxLayout* headings = new QVBoxLayout;
     headings->setSpacing(1);
     title_ = makeLabel(QString(), this, "chatTitle");
@@ -1498,8 +1508,31 @@ ChatView::ChatView(QWidget* parent)
     headings->addWidget(status_);
     top->addWidget(back);
     top->addLayout(headings, 1);
-    top->addWidget(options);
+    top->addWidget(optionsButton_);
+    top->addWidget(searchButton_);
     page->addLayout(top);
+
+    searchRow_ = new QWidget(this);
+    QHBoxLayout* search = new QHBoxLayout(searchRow_);
+    search->setContentsMargins(0, 0, 0, 0);
+    search->setSpacing(5);
+    searchInput_ = new QLineEdit(searchRow_);
+    searchInput_->setObjectName(QLatin1String("chatMessageSearch"));
+    searchInput_->setProperty("accessibleName", ui("Найти сообщение"));
+    searchInput_->setPlaceholderText(ui("Найти сообщение"));
+    searchInput_->setInputMethodHints(Qt::ImhNoAutoUppercase);
+    searchNext_ = makeButton(ui("Далее"), searchRow_, "chatMessageSearchNext");
+    searchNext_->setEnabled(false);
+    searchStatus_ = makeLabel(ui("Не найдено"), searchRow_, "chatMessageSearchStatus");
+    searchStatus_->hide();
+    search->addWidget(searchInput_, 1);
+    search->addWidget(searchStatus_);
+    search->addWidget(searchNext_);
+    page->addWidget(searchRow_);
+    searchRow_->hide();
+    QShortcut* closeSearch = new QShortcut(QKeySequence(Qt::Key_Escape), searchRow_);
+    closeSearch->setContext(Qt::WidgetWithChildrenShortcut);
+    connect(closeSearch, SIGNAL(activated()), searchButton_, SLOT(toggle()));
 
     history_ = new ChatHistory(this);
     linkPreviews_ = new LinkPreview::Store(this);
@@ -1560,6 +1593,10 @@ ChatView::ChatView(QWidget* parent)
 
     connect(back, SIGNAL(clicked()), this, SIGNAL(backRequested()));
     connect(pinAction_, SIGNAL(triggered(bool)), this, SIGNAL(pinRequested()));
+    connect(searchButton_, SIGNAL(toggled(bool)), this, SLOT(toggleMessageSearch(bool)));
+    connect(searchInput_, SIGNAL(textChanged(QString)), this, SLOT(updateMessageSearch()));
+    connect(searchInput_, SIGNAL(returnPressed()), this, SLOT(nextMessageSearchMatch()));
+    connect(searchNext_, SIGNAL(clicked()), this, SLOT(nextMessageSearchMatch()));
     connect(clearQuote, SIGNAL(clicked()), this, SLOT(removeQuote()));
     connect(emojiButton_, SIGNAL(clicked()), this, SLOT(chooseEmoji()));
     connect(attachmentButton_, SIGNAL(clicked()), this, SLOT(chooseAttachment()), Qt::QueuedConnection);
@@ -1591,13 +1628,18 @@ void ChatView::refreshLinkPreviews() {
 
 void ChatView::setAppearance(const Appearance::Palette& palette, int chatTextSize) {
     attachmentButton_->setIcon(SettingsIcons::icon(SettingsIcons::Attachments, palette.text));
+    optionsButton_->setIcon(SettingsIcons::icon(SettingsIcons::More, palette.text, 24));
+    searchButton_->setIcon(SettingsIcons::icon(SettingsIcons::Search, palette.text, 24));
     palette_ = palette;
     chatTextSize_ = Appearance::checkedChatTextSize(chatTextSize);
     const QString style = paletteStyle(
         "#nativeChat { background: @canvas; }"
         "#nativeChat QLabel { color: @text; }"
         "#nativeChat QLabel#chatTitle { font-weight: bold; font-size: 18px; }"
-        "#nativeChat QLabel#chatStatus, #nativeChat QLabel#chatByteLimit { color: @muted; font-size: 12px; }"
+        "#nativeChat QLabel#chatStatus, #nativeChat QLabel#chatByteLimit, "
+        "#nativeChat QLabel#chatMessageSearchStatus { color: @muted; font-size: 12px; }"
+        "#nativeChat QLineEdit#chatMessageSearch { color: @text; background: @chrome; "
+        " min-height: 34px; border: 1px solid @border; border-radius: 6px; padding: 3px 7px; }"
         "#nativeChat QTextEdit { color: @text; font-size: @sizepx; "
         " border: 1px solid @border; border-radius: 6px; selection-background-color: @selection; }"
         "#nativeChat QTextEdit#messageComposer { background: @chrome; }"
@@ -1609,6 +1651,8 @@ void ChatView::setAppearance(const Appearance::Palette& palette, int chatTextSiz
         "#nativeChat QPushButton { color: @text; background: @surface; border: 1px solid @border;"
         " border-radius: 7px; padding: 4px 7px; }"
         "#nativeChat QPushButton#sendMessage { color: @onAccent; background: @accent; font-weight: bold; }"
+        "#nativeChat QPushButton#chatOptionsButton::menu-indicator { width: 0px; }"
+        "#nativeChat QPushButton#chatMessageSearchButton:checked { background: @selection; }"
         "#nativeChat QPushButton:pressed { background: @selection; }"
         "#nativeChat QPushButton:disabled, #nativeChat QPushButton#sendMessage:disabled { "
         " color: @muted; background: @surface; }"
@@ -1637,6 +1681,7 @@ void ChatView::setContext(const QString& title, const QString& status, const QSt
     status_->setVisible(!status.isEmpty());
     if (activeId_ == activeId)
         return;
+    searchButton_->setChecked(false);
     activeId_ = activeId;
     attachmentButton_->setVisible(!activeId_.isEmpty() && Attachments::ready());
     syncChatBackground();
@@ -1660,6 +1705,7 @@ void ChatView::setMessages(const QVector<ChatMessage>& messages, bool opening) {
     hasDeferredMessages_ = false;
     deferredMessages_.clear();
     if (opening) {
+        searchButton_->setChecked(false);
         attachmentButton_->setVisible(!activeId_.isEmpty() && Attachments::ready());
         syncChatBackground();
         actionTarget_.clear();
@@ -1747,6 +1793,60 @@ void ChatView::setSendingState(bool canSend, int maxBytes) {
 
 void ChatView::setPinned(bool pinned) {
     pinAction_->setText(pinned ? ui("Открепить чат") : ui("Закрепить чат"));
+}
+
+void ChatView::toggleMessageSearch(bool open) {
+    searchRow_->setVisible(open);
+    if (open) {
+        searchInput_->setFocus();
+    } else {
+        searchInput_->clear();
+        searchButton_->setFocus();
+    }
+}
+
+void ChatView::updateMessageSearch() {
+    findMessage(SearchStep::Start);
+}
+
+void ChatView::nextMessageSearchMatch() {
+    findMessage(SearchStep::Earlier);
+}
+
+void ChatView::findMessage(SearchStep step) {
+    const QString query = searchInput_->text().trimmed();
+    QTextCursor match;
+    QTextDocument* document = history_->document();
+    const int end = document->characterCount() - 1;
+    const int previous = qMin(searchPosition_, end);
+    if (!query.isEmpty()) {
+        if (step == SearchStep::Earlier && previous >= 0)
+            match = document->find(query, previous, QTextDocument::FindBackward);
+        if (step == SearchStep::Refresh && previous >= 0) {
+            match = document->find(query, previous);
+            if (!match.isNull() && match.selectionStart() != previous)
+                match = QTextCursor();
+        }
+        if (match.isNull())
+            match = document->find(query, end, QTextDocument::FindBackward);
+    }
+    searchStatus_->setVisible(!query.isEmpty() && match.isNull());
+    searchNext_->setEnabled(!match.isNull());
+    searchPosition_ = match.isNull() ? -1 : match.selectionStart();
+
+    QList<QTextEdit::ExtraSelection> highlights;
+    if (!match.isNull()) {
+        QTextEdit::ExtraSelection highlight;
+        highlight.cursor = match;
+        highlight.format.setBackground(palette_.selection);
+        highlights.append(highlight);
+        if (step != SearchStep::Refresh || previous < 0) {
+            match.setPosition(searchPosition_);
+            history_->setTextCursor(match);
+            history_->ensureCursorVisible();
+        }
+    }
+    history_->setExtraSelections(highlights);
 }
 
 QString ChatView::composerText(int start, int end) const {

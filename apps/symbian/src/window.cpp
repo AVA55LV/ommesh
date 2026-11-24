@@ -47,7 +47,7 @@
 namespace {
 
 enum ItemData { ItemId = Qt::UserRole, ItemDetail, ItemStamp, ItemUnread,
-                ItemChannel, ItemPinned, ItemRole };
+                ItemChannel, ItemPinned, ItemRole, ItemPinnedBoundary };
 const int ChatRoomRole = -1;
 
 QString ui(const char* utf8) { return QString::fromUtf8(utf8); }
@@ -477,8 +477,12 @@ public:
             painter->setPen(colors.onAccent);
             painter->drawText(badge, Qt::AlignCenter, unread > 99 ? ui("99+") : QString::number(unread));
         }
-        painter->setPen(Appearance::mix(colors.canvas, colors.border, 67));
-        painter->drawLine(left, area.bottom(), area.right(), area.bottom());
+        if (index.data(ItemPinnedBoundary).toBool()) {
+            painter->fillRect(QRect(area.left(), area.bottom(), area.width(), 1), colors.border);
+        } else {
+            painter->setPen(Appearance::mix(colors.canvas, colors.border, 67));
+            painter->drawLine(left, area.bottom(), area.right(), area.bottom());
+        }
         painter->restore();
     }
 
@@ -534,12 +538,14 @@ struct ListRow {
     bool channel = false;
     bool pinned = false;
     int role = 0;
+    bool pinnedBoundary = false;
 
     bool matches(const QListWidgetItem& item) const {
         return id == item.data(ItemId).toString() && title == item.text() &&
                detail == item.data(ItemDetail).toString() && stamp == item.data(ItemStamp).toString() &&
                unread == item.data(ItemUnread).toInt() && channel == item.data(ItemChannel).toBool() &&
-               pinned == item.data(ItemPinned).toBool() && role == item.data(ItemRole).toInt();
+               pinned == item.data(ItemPinned).toBool() && role == item.data(ItemRole).toInt() &&
+               pinnedBoundary == item.data(ItemPinnedBoundary).toBool();
     }
 };
 
@@ -557,6 +563,8 @@ void displayRows(QListWidget* list, const QVector<ListRow>& rows) {
     for (const ListRow& row : rows) {
         QListWidgetItem* item = appendRow(list, row.id, row.title, row.detail, row.stamp,
                                         row.unread, row.channel, row.pinned, row.role);
+        if (row.pinnedBoundary)
+            item->setData(ItemPinnedBoundary, true);
         if (row.id == selected)
             list->setCurrentItem(item);
     }
@@ -2324,10 +2332,12 @@ void ClientWindow::showTargets(const QVector<ChatTarget>& targets) {
     emptyChats_->setVisible(rows.isEmpty());
     QVector<ListRow> rendered;
     rendered.reserve(rows.size());
-    for (const ChatRow& row : rows) {
+    for (int index = 0; index < rows.size(); ++index) {
+        const ChatRow& row = rows[index];
+        const bool pinnedBoundary = row.pinned && index + 1 < rows.size() && !rows[index + 1].pinned;
         rendered.append(ListRow{row.target.id, row.target.title, row.detail, shortDate(row.timestamp),
                                row.target.unread, row.target.channel, row.pinned,
-                               rooms.contains(row.target.id) ? ChatRoomRole : 0});
+                               rooms.contains(row.target.id) ? ChatRoomRole : 0, pinnedBoundary});
     }
     displayRows(targets_, rendered);
 }

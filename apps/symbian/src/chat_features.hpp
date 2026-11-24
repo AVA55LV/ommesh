@@ -12,6 +12,7 @@
 
 class QAction;
 class QLabel;
+class QLineEdit;
 class QPushButton;
 class QTextEdit;
 class ChatHistory;
@@ -72,9 +73,14 @@ private slots:
     void selectQuickReaction(int choice);
     void applyDeferredMessages();
     void refreshLinkPreviews();
+    void toggleMessageSearch(bool open);
+    void updateMessageSearch();
+    void nextMessageSearchMatch();
 
 private:
     friend class ChatHistory;
+
+    enum class SearchStep { Start, Earlier, Refresh };
 
     QString composerText(int start = 0, int end = -1) const;
     QString outgoingText(const QString& body) const;
@@ -86,11 +92,19 @@ private:
     void replyTo(const ChatMessage& message, const QStringList& newerTexts);
     void showDetails(const ChatMessage& message);
     void showReactionAuthors(const ChatMessage& message, const QString& emoji = QString());
+    void findMessage(SearchStep step);
 
     QLabel* title_;
     QLabel* status_;
     QLabel* byteLimit_;
     QAction* pinAction_;
+    QPushButton* optionsButton_;
+    QPushButton* searchButton_;
+    QWidget* searchRow_;
+    QLineEdit* searchInput_;
+    QPushButton* searchNext_;
+    QLabel* searchStatus_;
+    int searchPosition_ = -1;
     ChatHistory* history_;
     LinkPreview::Store* linkPreviews_ = nullptr;
     bool previewRefreshPending_ = false;
