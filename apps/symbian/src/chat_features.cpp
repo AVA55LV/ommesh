@@ -22,7 +22,6 @@
 #include <QtGui/QAbstractTextDocumentLayout>
 #include <QtGui/QAction>
 #include <QtGui/QContextMenuEvent>
-#include <QtGui/QDesktopWidget>
 #include <QtGui/QDesktopServices>
 #include <QtGui/QDialog>
 #include <QtGui/QFont>
@@ -85,8 +84,6 @@ const int relayBadgeLimit = 20;
 const int receiptTextSize = 14;
 const int reactionTextSize = 13;
 const int reactionBadgePadding = 4;
-const int chatBottomMargin = 6;
-const int keyboardWatchMs = 150;
 
 enum ReceiptKind { NoReceipt, SendingReceipt, WaitingReceipt, AcceptedReceipt, ConfirmedReceipt };
 enum MessageMenuAction { RemoveReaction, Reply, Resend, ReactionPeople, MessageDetails, BlockSender,
@@ -1516,9 +1513,10 @@ ChatView::ChatView(QWidget* parent)
       restoreDisplay_(false), hasMessageSnapshot_(false) {
     setObjectName(QLatin1String("nativeChat"));
     setAttribute(Qt::WA_StyledBackground);
+    setProperty(NativeKeyboard::LayoutAnchor, true);
 
     QVBoxLayout* page = new QVBoxLayout(this);
-    page->setContentsMargins(8, 5, 8, chatBottomMargin);
+    page->setContentsMargins(8, 5, 8, 6);
     page->setSpacing(5);
     QHBoxLayout* top = new QHBoxLayout;
     top->setSpacing(7);
@@ -1612,8 +1610,6 @@ ChatView::ChatView(QWidget* parent)
     composer_->setAcceptRichText(false);
     composer_->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     composer_->setFixedHeight(59);
-    keyboardWatch_ = new QTimer(this);
-    composer_->installEventFilter(this);
     emojiButton_ = makeButton(QString(), this, "emojiButton");
     emojiButton_->setProperty("accessibleName", ui("Смайлики"));
     emojiButton_->setToolTip(ui("Смайлики"));
@@ -1645,77 +1641,10 @@ ChatView::ChatView(QWidget* parent)
     connect(emojiButton_, SIGNAL(clicked()), this, SLOT(chooseEmoji()));
     connect(attachmentButton_, SIGNAL(clicked()), this, SLOT(chooseAttachment()), Qt::QueuedConnection);
     connect(composer_, SIGNAL(textChanged()), this, SLOT(updateComposer()));
-    connect(qApp, SIGNAL(focusChanged(QWidget*,QWidget*)), this, SLOT(composerFocusChanged(QWidget*,QWidget*)));
-    connect(keyboardWatch_, SIGNAL(timeout()), this, SLOT(updateKeyboardInset()));
     connect(sendButton_, SIGNAL(clicked()), this, SLOT(send()));
     const Appearance::Preferences appearance = Appearance::preferences();
     setAppearance(Appearance::palette(appearance.theme), appearance.chatTextSize);
     updateComposer();
-}
-
-void ChatView::composerFocusChanged(QWidget* previous, QWidget* focus) {
-    if (previous != composer_ && focus != composer_ && !keyboardWatch_->isActive())
-        return;
-    // The native editor can momentarily take Qt focus when opening the FEP.
-    if (!focus && keyboardWatch_->isActive())
-        return;
-    const bool split = focus == composer_ && !NativeKeyboard::fullScreenPreferred();
-    if (NativeKeyboard::setSplitMode(focus, split)) {
-        if (!keyboardWatch_->isActive()) {
-            NativeKeyboard::takePanelEvent();
-            keyboardTouchActive_ = NativeKeyboard::touchInputActive();
-        }
-        keyboardWatch_->start(keyboardWatchMs);
-    } else {
-        keyboardWatch_->stop();
-        keyboardPanelOpen_ = false;
-    }
-    updateKeyboardInset();
-}
-
-bool ChatView::eventFilter(QObject* watched, QEvent* event) {
-    if (watched == composer_ && keyboardWatch_->isActive()) {
-        const bool opening = event->type() == QEvent::RequestSoftwareInputPanel;
-        if (opening || event->type() == QEvent::CloseSoftwareInputPanel) {
-            NativeKeyboard::takePanelEvent();
-            keyboardTouchActive_ = NativeKeyboard::touchInputActive();
-            keyboardPanelOpen_ = opening;
-            updateKeyboardInset();
-        } else if (event->type() == QEvent::Hide) {
-            keyboardWatch_->stop();
-            keyboardPanelOpen_ = false;
-            NativeKeyboard::setSplitMode(nullptr, false);
-            updateKeyboardInset();
-        }
-    }
-    return QWidget::eventFilter(watched, event);
-}
-
-void ChatView::updateKeyboardInset() {
-    QLayout* page = layout();
-    const QMargins margins = page->contentsMargins();
-    int bottom = chatBottomMargin;
-    if (keyboardWatch_->isActive() && isVisible()) {
-        const auto panelEvent = NativeKeyboard::takePanelEvent();
-        const int touchActive = NativeKeyboard::touchInputActive();
-        if (panelEvent != NativeKeyboard::PanelEvent::None)
-            keyboardPanelOpen_ = panelEvent == NativeKeyboard::PanelEvent::Open;
-        else if (touchActive >= 0 && touchActive != keyboardTouchActive_ &&
-                 (touchActive == 1 || keyboardTouchActive_ == 1))
-            keyboardPanelOpen_ = touchActive != 0;
-        if (touchActive >= 0)
-            keyboardTouchActive_ = touchActive;
-        if (keyboardPanelOpen_) {
-            const int visibleBottom = NativeKeyboard::splitViewBottom(QApplication::desktop()->screenGeometry(window()));
-            if (visibleBottom >= 0) {
-                const int overlap = mapToGlobal(QPoint(0, height())).y() - visibleBottom;
-                const int maxInset = height() - page->minimumSize().height() + margins.bottom() - chatBottomMargin;
-                bottom += qBound(0, overlap, qMax(0, maxInset));
-            }
-        }
-    }
-    if (margins.bottom() != bottom)
-        page->setContentsMargins(margins.left(), margins.top(), margins.right(), bottom);
 }
 
 void ChatView::syncLinkPreviewMode() {

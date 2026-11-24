@@ -32,7 +32,7 @@ namespace net = symbian::api::connectivity;
 
 constexpr char kHost[] = "tile.openstreetmap.org";
 constexpr char kPreviewHost[] = "preview.ommesh.ru";
-constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.32 (+https://github.com/cm4ker/ommesh)";
+constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.33 (+https://github.com/cm4ker/ommesh)";
 constexpr int kMaximumTileBytes = 160 * 1024;
 constexpr std::size_t kNativeIoLimit = 32 * 1024;
 constexpr char kPng256Header[] =

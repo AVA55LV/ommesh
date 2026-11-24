@@ -37,7 +37,7 @@
      if (data_relocs.flags != 2 || data_relocs.info != 0 ||
          data_relocs.entry_size != 8 || data_relocs.size == 0 ||
 -        data_relocs.size > 256 * 8 || data_relocs.size % 8) {
-+        data_relocs.size > 2048 * 8 || data_relocs.size % 8) {
++        data_relocs.size > 2176 * 8 || data_relocs.size % 8) {
        return absl::DataLossError("Invalid imported data relocation table");
      }
      expected.emplace(17, data_relocs.address);  // DT_REL

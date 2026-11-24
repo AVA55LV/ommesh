@@ -78,6 +78,7 @@ symbian_add_executable(ommesh_belle SOURCES
   src/native_wlan.cpp
   src/native_location.cpp
   src/native_keyboard.cpp
+  src/keyboard_layout.cpp
   src/phone_location.cpp
   src/native_tile_https.cpp
   src/native_allocator.cpp

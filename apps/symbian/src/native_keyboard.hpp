@@ -8,17 +8,19 @@
 #endif
 
 class QWidget;
+class QApplication;
 
 namespace NativeKeyboard {
 
 constexpr char FullScreenPreference[] = "ui/fullScreenKeyboard";
+constexpr char LayoutAnchor[] = "nativeKeyboardLayoutAnchor";
 
 enum class PanelEvent { None, Open, Closed };
 
 #ifdef Q_OS_SYMBIAN
 class Application : public QApplication {
 public:
-    using QApplication::QApplication;
+    Application(int& argc, char** argv);
 
 protected:
     bool symbianEventFilter(const QSymbianEvent* event) override;
@@ -30,6 +32,7 @@ private:
 #endif
 
 bool fullScreenPreferred();
+void watchEditors(QApplication& application);
 bool setSplitMode(QWidget* focusedEditor, bool split);
 PanelEvent takePanelEvent();
 int touchInputActive();

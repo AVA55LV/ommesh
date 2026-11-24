@@ -26,6 +26,10 @@ const int splitViewCloseEvent = 0x2001E2C1;
 
 } // namespace
 
+Application::Application(int& argc, char** argv) : QApplication(argc, argv) {
+    watchEditors(*this);
+}
+
 bool Application::symbianEventFilter(const QSymbianEvent* event) {
     if (event->type() == QSymbianEvent::ResourceChangeEvent) {
         if (event->resourceChangeType() == splitViewOpenEvent)

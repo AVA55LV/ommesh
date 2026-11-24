@@ -16,7 +16,6 @@ class QLabel;
 class QLineEdit;
 class QPushButton;
 class QTextEdit;
-class QTimer;
 class ChatHistory;
 namespace LinkPreview { class Store; }
 
@@ -59,7 +58,6 @@ public:
 
 protected:
     void hideEvent(QHideEvent* event) override;
-    bool eventFilter(QObject* watched, QEvent* event) override;
 
 signals:
     void backRequested();
@@ -84,8 +82,6 @@ private slots:
     void toggleMessageSearch(bool open);
     void updateMessageSearch();
     void nextMessageSearchMatch();
-    void composerFocusChanged(QWidget* previous, QWidget* focus);
-    void updateKeyboardInset();
 
 private:
     friend class ChatHistory;
@@ -121,9 +117,6 @@ private:
     QWidget* quotePreview_;
     QTextEdit* quoteText_;
     QTextEdit* composer_;
-    QTimer* keyboardWatch_;
-    bool keyboardPanelOpen_ = false;
-    int keyboardTouchActive_ = -1;
     QPushButton* emojiButton_;
     QPushButton* attachmentButton_;
     QPushButton* sendButton_;

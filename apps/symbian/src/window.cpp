@@ -22,6 +22,7 @@
 #include <QtCore/QTimerEvent>
 #include <QtGui/QButtonGroup>
 #include <QtGui/QClipboard>
+#include <QtGui/QComboBox>
 #include <QtGui/QDialog>
 #include <QtGui/QFontMetrics>
 #include <QtGui/QHBoxLayout>
@@ -41,6 +42,7 @@
 #include <QtGui/QScrollBar>
 #include <QtGui/QStackedWidget>
 #include <QtGui/QStyledItemDelegate>
+#include <QtGui/QTextEdit>
 #include <QtGui/QToolButton>
 #include <QtGui/QVBoxLayout>
 
@@ -351,11 +353,49 @@ private:
     bool dragged_ = false;
 };
 
+class TouchScrollBar : public QScrollBar {
+public:
+    explicit TouchScrollBar(QWidget* parent) : QScrollBar(Qt::Vertical, parent) {}
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        QScrollBar::mousePressEvent(event);
+        if (isSliderDown())
+            grabMouse();
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        if (!isSliderDown()) {
+            QScrollBar::mouseMoveEvent(event);
+            return;
+        }
+        // Keep Qt's thumb-to-value mapping even if a finger drifts outside the track.
+        const QPoint onTrack(width() / 2, qBound(0, event->y(), qMax(0, height() - 1)));
+        QMouseEvent move(QEvent::MouseMove, onTrack, mapToGlobal(onTrack), Qt::NoButton,
+                         Qt::LeftButton, event->modifiers());
+        QScrollBar::mouseMoveEvent(&move);
+        event->accept();
+    }
+
+    void mouseReleaseEvent(QMouseEvent* event) override {
+        QScrollBar::mouseReleaseEvent(event);
+        if (!isSliderDown() && mouseGrabber() == this)
+            releaseMouse();
+    }
+
+    void hideEvent(QHideEvent* event) override {
+        if (mouseGrabber() == this)
+            releaseMouse();
+        QScrollBar::hideEvent(event);
+    }
+};
+
 class TouchScrollArea : public QScrollArea {
 public:
     explicit TouchScrollArea(QWidget* parent) : QScrollArea(parent) {
         setWidgetResizable(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setVerticalScrollBar(new TouchScrollBar(this));
     }
 
     void setContent(QWidget* content) {
@@ -366,42 +406,87 @@ public:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override {
+        // Detail pages are constructed under Settings and later move to their own viewport.
+        QWidget* source = qobject_cast<QWidget*>(watched);
+        if (source != viewport() && !viewport()->isAncestorOf(source))
+            return QScrollArea::eventFilter(watched, event);
         if (event->type() == QEvent::ChildPolished) {
             auto* child = qobject_cast<QWidget*>(static_cast<QChildEvent*>(event)->child());
             if (child && !child->isWindow())
                 watch(child);
         }
-        if (event->type() != QEvent::MouseButtonPress && event->type() != QEvent::MouseMove &&
-                event->type() != QEvent::MouseButtonRelease)
+        if (watched == viewport() && event->type() == QEvent::UngrabMouse)
+            endGesture();
+        if (!viewport()->isVisible() || (event->type() != QEvent::MouseButtonPress &&
+                event->type() != QEvent::MouseMove && event->type() != QEvent::MouseButtonRelease))
             return QScrollArea::eventFilter(watched, event);
         QMouseEvent* mouse = static_cast<QMouseEvent*>(event);
         if (event->type() == QEvent::MouseButtonPress && mouse->button() == Qt::LeftButton) {
-            pressed_ = true;
-            dragging_ = false;
-            start_ = mouse->globalPos();
-            scroll_ = verticalScrollBar()->value();
-            button_ = qobject_cast<QAbstractButton*>(watched);
-        } else if (event->type() == QEvent::MouseMove && pressed_ && (mouse->buttons() & Qt::LeftButton)) {
-            const QPoint offset = mouse->globalPos() - start_;
-            if (verticalScrollBar()->maximum() > 0 && qAbs(offset.y()) > 8 && qAbs(offset.y()) > qAbs(offset.x()))
-                dragging_ = true;
-            if (dragging_) {
-                if (button_)
-                    button_->setDown(false);
-                verticalScrollBar()->setValue(scroll_ - offset.y());
+            beginGesture(mouse->globalPos());
+        } else if (event->type() == QEvent::MouseMove && pressed_) {
+            if (panTo(mouse->globalPos()))
                 return true;
-            }
-        } else if (event->type() == QEvent::MouseButtonRelease) {
-            pressed_ = false;
-            if (dragging_) {
-                dragging_ = false;
+        } else if (event->type() == QEvent::MouseButtonRelease && mouse->button() == Qt::LeftButton && pressed_) {
+            const bool panned = panTo(mouse->globalPos());
+            endGesture();
+            if (panned)
                 return true;
-            }
         }
         return QScrollArea::eventFilter(watched, event);
     }
 
+    void hideEvent(QHideEvent* event) override {
+        endGesture();
+        QScrollArea::hideEvent(event);
+    }
+
 private:
+    void beginGesture(const QPoint& at) {
+        endGesture();
+        QScrollBar* bar = verticalScrollBar();
+        const QPoint inside = viewport()->mapFromGlobal(at);
+        if (bar->minimum() == bar->maximum() || !viewport()->rect().contains(inside))
+            return;
+        for (QWidget* hit = viewport()->childAt(inside); hit && hit != viewport(); hit = hit->parentWidget()) {
+            if (qobject_cast<QLineEdit*>(hit) || qobject_cast<QTextEdit*>(hit) ||
+                    qobject_cast<QComboBox*>(hit) || qobject_cast<QAbstractSlider*>(hit))
+                return;
+            if (auto* inner = qobject_cast<QAbstractScrollArea*>(hit)) {
+                if (inner->verticalScrollBarPolicy() != Qt::ScrollBarAlwaysOff &&
+                        inner->verticalScrollBar()->minimum() < inner->verticalScrollBar()->maximum())
+                    return;
+            }
+            if (!button_)
+                button_ = qobject_cast<QAbstractButton*>(hit);
+        }
+        pressed_ = true;
+        previous_ = at;
+    }
+
+    bool panTo(const QPoint& at) {
+        const QPoint offset = at - previous_;
+        if (!dragging_) {
+            if (qAbs(offset.y()) < 6 || qAbs(offset.y()) * 2 < qAbs(offset.x()))
+                return false;
+            dragging_ = true;
+            if (button_)
+                button_->setDown(false);
+            viewport()->grabMouse();
+        }
+        QScrollBar* bar = verticalScrollBar();
+        bar->setValue(bar->value() - offset.y());
+        previous_ = at;
+        return true;
+    }
+
+    void endGesture() {
+        const bool releaseGrab = dragging_ && QWidget::mouseGrabber() == viewport();
+        pressed_ = dragging_ = false;
+        button_ = nullptr;
+        if (releaseGrab)
+            viewport()->releaseMouse();
+    }
+
     void watch(QWidget* content) {
         content->installEventFilter(this);
         const auto descendants = content->findChildren<QWidget*>();
@@ -411,8 +496,7 @@ private:
     }
 
     QPointer<QAbstractButton> button_;
-    QPoint start_;
-    int scroll_ = 0;
+    QPoint previous_;
     bool pressed_ = false;
     bool dragging_ = false;
 };
@@ -666,6 +750,8 @@ QString themeStyle(const Appearance::Palette& colors) {
         "QListWidget, QScrollArea { border: 0; background: @canvas@; color: @text@; }"
         "QScrollBar:vertical { background: @chrome@; width: 10px; margin: 0; }"
         "QScrollBar::handle:vertical { background: @scrollHandle@; border-radius: 4px; min-height: 26px; }"
+        "#detailPage QScrollBar:vertical { width: 18px; }"
+        "#detailPage QScrollBar::handle:vertical { border-radius: 6px; min-height: 35px; }"
         "QScrollBar::add-page:vertical, QScrollBar::sub-page:vertical { background: @chrome@; }"
         "QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }"
         "QPushButton { background: @surface@; color: @text@; border: 1px solid @border@;"
@@ -1598,7 +1684,9 @@ void ClientWindow::applyNavigation() {
     if (action == Navigation::MapSettings) {
         MapSettingsPanel* settings = new MapSettingsPanel(this);
         connect(settings, SIGNAL(saved()), this, SLOT(mapSettingsSaved()));
-        showDetailPage(settings, ui("Интернет-карта"));
+        QScrollArea* scroll = makeTouchScrollArea(this, settings);
+        scroll->setObjectName(QLatin1String("mapSettingsScroll"));
+        showDetailPage(scroll, ui("Интернет-карта"));
         return;
     }
     if (action == Navigation::NewChat) {
@@ -2102,7 +2190,9 @@ void ClientWindow::openMapSettings() {
 }
 
 void ClientWindow::mapSettingsSaved() {
-    if (sender() == detailContent_.data())
+    const auto* settings = qobject_cast<MapSettingsPanel*>(sender());
+    const auto* scroll = qobject_cast<QScrollArea*>(detailContent_.data());
+    if (settings && scroll && scroll->widget() == settings && pages_->currentWidget() == detailPage_)
         queueNavigation(Navigation::MapSaved);
 }
 

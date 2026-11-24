@@ -1567,7 +1567,7 @@ void NodeMap::loadVisibleTiles() {
             return;
         }
         QNetworkRequest request(QUrl(s.localProxy->baseUrl() + key));
-        request.setRawHeader("User-Agent", "OMMesh-Belle-SIS/0.2.32 (+https://github.com/cm4ker/ommesh)");
+        request.setRawHeader("User-Agent", "OMMesh-Belle-SIS/0.2.33 (+https://github.com/cm4ker/ommesh)");
         request.setRawHeader("Accept", "image/png");
         request.setRawHeader("Accept-Encoding", "identity");
         const QNetworkCacheMetaData::RawHeaderList previous = saved.rawHeaders();

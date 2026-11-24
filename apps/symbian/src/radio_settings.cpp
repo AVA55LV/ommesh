@@ -1276,9 +1276,9 @@ void RadioSettingsPanel::showMessagePreferences() {
         setRowValue(blocked, QString::number(blockedCount));
     connect(blocked, SIGNAL(clicked()), this, SLOT(showBlockedSenders()), Qt::QueuedConnection);
 
-    auto* keyboard = settingsGroup(layout, content, ui("Клавиатура в переписке"));
+    auto* keyboard = settingsGroup(layout, content, ui("Системная клавиатура"));
     option(keyboard, "Полноэкранный ввод", NativeKeyboard::FullScreenPreference,
-           "Включено: системный редактор во весь экран. Выключено: клавиатура снизу.");
+           "Выбирает клавиатуру во всём приложении. Выключено — клавиатура снизу.");
 
     auto* compactRows = settingsGroup(layout, content, QString());
     auto* compact = option(compactRows, "Заменять похожие буквы", "ui/compactCyrillic",
