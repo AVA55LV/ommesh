@@ -32,6 +32,7 @@ struct ChatReaction {
     QString emoji;
     int count = 0;
     bool own = false;
+    QStringList authors;  // External authors only; an empty entry means the name is unknown.
 };
 
 struct ChatMessage {

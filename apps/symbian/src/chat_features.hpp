@@ -79,11 +79,13 @@ private:
     QString composerText(int start = 0, int end = -1) const;
     QString outgoingText(const QString& body) const;
     void showQuotePreview();
-    void queueMessageActions(int index, const QPoint& globalPosition, bool blockedRun = false);
+    void queueMessageActions(int index, const QPoint& globalPosition, bool blockedRun = false,
+                             const QString& reactionEmoji = QString());
     int pickEmoji(const QString& title);
     void reactTo(const ChatMessage& message, const QString& emoji);
     void replyTo(const ChatMessage& message, const QStringList& newerTexts);
     void showDetails(const ChatMessage& message);
+    void showReactionAuthors(const ChatMessage& message, const QString& emoji = QString());
 
     QLabel* title_;
     QLabel* status_;
@@ -111,6 +113,7 @@ private:
     QString actionTarget_;
     QPoint actionPosition_;
     bool actionBlockedRun_ = false;
+    QString actionReaction_;
     Appearance::Palette palette_;
     QBrush backdrop_;
     int chatTextSize_;

@@ -750,14 +750,33 @@ ChatMessage Client::displayMessage(const StoredMessage& row) const {
         if (reaction.emoji.isEmpty() ||
                 (channel && !reaction.own && blocks_.contains(channelBlockId(reaction.actor))))
             continue;
+        QString author;
+        if (!reaction.own) {
+            author = reaction.actor.simplified();
+            if (!channel && reaction.actor.startsWith(QLatin1String("d/"))) {
+                const QString prefix = reaction.actor.mid(2).toUpper();
+                author = targetNames_.value(reaction.actor).simplified();
+                if ((author.isEmpty() || author == prefix) && !row.message.outgoing &&
+                        row.target == reaction.actor) {
+                    const QString recorded = row.message.author.simplified();
+                    if (!recorded.isEmpty())
+                        author = recorded;
+                }
+                if (author.isEmpty())
+                    author = prefix;
+            }
+        }
         auto matching = std::find_if(result.reactions.begin(), result.reactions.end(), [&](const auto& summary) {
             return summary.emoji == reaction.emoji;
         });
         if (matching == result.reactions.end()) {
-            result.reactions.append(ChatReaction{reaction.emoji, 1, reaction.own});
+            result.reactions.append(ChatReaction{reaction.emoji, 1, reaction.own,
+                                                 reaction.own ? QStringList() : QStringList(author)});
         } else {
             ++matching->count;
             matching->own = matching->own || reaction.own;
+            if (!reaction.own)
+                matching->authors.append(author);
         }
     }
     return result;

@@ -78,6 +78,7 @@ const int receiptTickMs = 70;
 const int relayBadgeLimit = 20;
 const int receiptTextSize = 14;
 const int reactionTextSize = 13;
+const int reactionBadgePadding = 4;
 
 enum ReceiptKind { NoReceipt, SendingReceipt, WaitingReceipt, AcceptedReceipt, ConfirmedReceipt };
 
@@ -328,7 +329,7 @@ bool sameReactions(const QVector<ChatReaction>& left, const QVector<ChatReaction
     for (int i = 0; i < left.size(); ++i) {
         const ChatReaction& a = left.at(i);
         const ChatReaction& b = right.at(i);
-        if (a.emoji != b.emoji || a.count != b.count || a.own != b.own)
+        if (a.emoji != b.emoji || a.count != b.count || a.own != b.own || a.authors != b.authors)
             return false;
     }
     return true;
@@ -459,7 +460,7 @@ void insertQuote(QTextCursor& cursor, const ChatFeatures::ReplyQuote& quote,
 
 void insertReactions(QTextCursor& cursor, const QVector<ChatReaction>& reactions,
                      const Appearance::Palette& palette) {
-    const int padding = 4;
+    const int padding = reactionBadgePadding;
     const int iconSize = 15;
     for (int i = 0; i < reactions.size(); ++i) {
         const ChatReaction& reaction = reactions.at(i);
@@ -524,6 +525,43 @@ void insertReactions(QTextCursor& cursor, const QVector<ChatReaction>& reactions
     }
 }
 
+bool visibleReaction(const ChatReaction& reaction) {
+    return !reaction.emoji.isEmpty() && reaction.count > 0;
+}
+
+void insertReactionAuthors(QTextCursor& cursor, const QVector<ChatReaction>& reactions,
+                            const Appearance::Palette& palette, const QString& emoji, bool heading) {
+    const QTextCharFormat names = textColor(palette.text);
+    bool first = true;
+    for (int i = 0; i < reactions.size(); ++i) {
+        const ChatReaction& reaction = reactions.at(i);
+        if (!visibleReaction(reaction) || (!emoji.isEmpty() && reaction.emoji != emoji))
+            continue;
+        if (first && heading) {
+            cursor.insertBlock();
+            cursor.insertText(ui("Реакции"), textColor(palette.accent, true));
+        }
+        if (!first || heading)
+            cursor.insertBlock();
+        first = false;
+
+        QStringList people;
+        if (reaction.own)
+            people.append(ui("Вы"));
+        for (int index = 0; index < reaction.authors.size() && people.size() < reaction.count; ++index) {
+            const QString name = reaction.authors.at(index).simplified();
+            if (!name.isEmpty())
+                people.append(name);
+        }
+        if (people.size() < reaction.count)
+            people.append(ui("Без имени (%1)").arg(reaction.count - people.size()));
+
+        insertText(cursor, reaction.emoji, names, 18);
+        cursor.insertText(QLatin1String("  "), names);
+        insertText(cursor, people.join(QLatin1String(", ")), names);
+    }
+}
+
 ReceiptKind receiptKind(const ChatMessage& message) {
     if (!message.outgoing)
         return NoReceipt;
@@ -571,8 +609,7 @@ void insertMessageFooter(QTextCursor& cursor, const ChatMessage& message, Receip
     QString delivery = message.outgoing ? message.delivery : QString();
     const QString time = message.timestamp == 0 ? QString() : QDateTime::fromTime_t(message.timestamp)
         .toString(QLatin1String(receipt ? "HH:mm" : "dd.MM HH:mm"));
-    const bool hasReactions = std::any_of(message.reactions.constBegin(), message.reactions.constEnd(),
-        [](const ChatReaction& reaction) { return !reaction.emoji.isEmpty() && reaction.count > 0; });
+    const bool hasReactions = std::any_of(message.reactions.constBegin(), message.reactions.constEnd(), visibleReaction);
     const bool sharedRow = hasReactions && (!time.isEmpty() || kind != NoReceipt);
     const QChar gap(0xa0);
     const QTextCharFormat timeFormat = textColor(palette.muted, false,
@@ -1193,8 +1230,13 @@ protected:
             QTextFrame* frame = frameAt(event->pos());
             if (frame && frame == frameAt(downAt_)) {
                 focusFrame_ = navigationFrames_.indexOf(frame);
-                if (!handleLinkTap(frame, event->pos()))
+                const QString emoji = reactionAt(event->pos());
+                if (!emoji.isEmpty() && emoji == reactionAt(downAt_)) {
+                    owner_->queueMessageActions(frame->frameFormat().intProperty(messageIndex),
+                                                event->globalPos(), false, emoji);
+                } else if (!handleLinkTap(frame, event->pos())) {
                     queueFrameAction(frame, event->globalPos());
+                }
             }
         }
         event->accept();
@@ -1234,6 +1276,28 @@ protected:
     }
 
 private:
+    QString reactionAt(const QPoint& point) const {
+        const int position = cursorForPosition(point).position();
+        QTextCursor item(document());
+        // A tap on an inline image can resolve to either side of its character.
+        for (int at = position; at >= position - 1; --at) {
+            if (at < 0 || at >= document()->characterCount() - 1 ||
+                document()->characterAt(at) != QChar::ObjectReplacementCharacter)
+                continue;
+            item.setPosition(at + 1);
+            const QTextCharFormat format = item.charFormat();
+            if (!format.isImageFormat() || !format.hasProperty(reactionBadgeCount))
+                continue;
+            const QTextImageFormat image = format.toImageFormat();
+            item.setPosition(at);
+            const QRect bounds = inlineRect(item, qRound(image.width()) - reactionBadgePadding,
+                                            qRound(image.height()));
+            if (bounds.contains(point))
+                return format.stringProperty(originalEmoji);
+        }
+        return QString();
+    }
+
     void paintBubbleCorners(QPainter& painter, const QRect& dirty) const {
         const QPoint offset(horizontalScrollBar()->value(), verticalScrollBar()->value());
         const QRectF documentDirty(dirty.translated(offset));
@@ -1339,11 +1403,14 @@ private:
     QRect receiptRect(const Receipt& receipt) const {
         QTextCursor cursor(document());
         cursor.setPosition(receipt.position);
+        return inlineRect(cursor, receiptWidth, receiptHeight);
+    }
+
+    QRect inlineRect(const QTextCursor& cursor, int width, int height) const {
         const QRect caret = cursorRect(cursor);
         const QTextLine line = cursor.block().layout()->lineForTextPosition(cursor.positionInBlock());
-        // Use the line baseline so the animated badge matches the inline image in the details view.
         const int baseline = line.isValid() ? caret.top() + qRound(line.ascent()) : caret.bottom();
-        return QRect(caret.x(), baseline - receiptHeight + 1, receiptWidth, receiptHeight);
+        return QRect(caret.x(), baseline - height + 1, width, height);
     }
 
     void stopReceiptTimer() {
@@ -1778,18 +1845,22 @@ void ChatView::send() {
         emit sendRequested(outgoingText(composerText()));
 }
 
-void ChatView::queueMessageActions(int index, const QPoint& globalPosition, bool blockedRun) {
+void ChatView::queueMessageActions(int index, const QPoint& globalPosition, bool blockedRun,
+                                   const QString& reactionEmoji) {
     if (index < 0 || index >= messages_.size())
         return;
     actionMessage_ = messages_.at(index);
     actionTarget_ = activeId_;
     actionPosition_ = globalPosition;
     actionBlockedRun_ = blockedRun;
+    actionReaction_ = reactionEmoji;
     actionNewerTexts_.clear();
-    for (int i = index + 1; i < messages_.size(); ++i) {
-        const ChatMessage& next = messages_.at(i);
-        if (next.author == actionMessage_.author && next.outgoing == actionMessage_.outgoing)
-            actionNewerTexts_.append(next.text);
+    if (reactionEmoji.isEmpty()) {
+        for (int i = index + 1; i < messages_.size(); ++i) {
+            const ChatMessage& next = messages_.at(i);
+            if (next.author == actionMessage_.author && next.outgoing == actionMessage_.outgoing)
+                actionNewerTexts_.append(next.text);
+        }
     }
     QTimer::singleShot(0, this, SLOT(showMessageActions()));
 }
@@ -1800,9 +1871,15 @@ void ChatView::showMessageActions() {
     const ChatMessage message = actionMessage_;
     const QStringList newer = actionNewerTexts_;
     const QString target = actionTarget_;
+    const QString reaction = actionReaction_;
     actionTarget_.clear();
+    actionReaction_.clear();
     if (actionBlockedRun_) {
         history_->toggleBlockedRun(message);
+        return;
+    }
+    if (!reaction.isEmpty()) {
+        showReactionAuthors(message, reaction);
         return;
     }
 
@@ -1848,6 +1925,8 @@ void ChatView::showMessageActions() {
     QAction* repeat = message.outgoing ? menu.addAction(ui("Отправить заново")) : 0;
     if (repeat)
         repeat->setEnabled(canSend_ && maxBytes_ > 0 && message.text.toUtf8().size() <= maxBytes_);
+    QAction* people = std::any_of(message.reactions.constBegin(), message.reactions.constEnd(), visibleReaction)
+        ? menu.addAction(ui("Кто поставил реакции")) : 0;
     QAction* details = menu.addAction(ui("Подробности"));
     QAction* block = 0;
     if (!message.blockId.isEmpty()) {
@@ -1872,6 +1951,8 @@ void ChatView::showMessageActions() {
         replyTo(message, newer);
     } else if (selected && selected == repeat && canSend_) {
         emit resendRequested(message.text);
+    } else if (selected && selected == people) {
+        showReactionAuthors(message);
     } else if (selected == details) {
         showDetails(message);
     } else if (selected && selected == block) {
@@ -1927,6 +2008,7 @@ void ChatView::showDetails(const ChatMessage& message) {
     text->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     QTextCursor cursor(text->document());
     text->setBubble(insertMessage(cursor, message, 0, MessageText::preferences(), palette_, chatTextSize_));
+    insertReactionAuthors(cursor, message.reactions, palette_, QString(), true);
     const QTextCharFormat format = textColor(palette_.muted);
     const QString route = routeText(message);
     if (!route.isEmpty()) {
@@ -1942,6 +2024,33 @@ void ChatView::showDetails(const ChatMessage& message) {
     layout->addWidget(close);
     connect(close, SIGNAL(clicked()), &dialog, SLOT(reject()));
     dialog.resize(qMax(270, width() - 18), qMin(420, qMax(250, height() - 36)));
+    dialog.exec();
+}
+
+void ChatView::showReactionAuthors(const ChatMessage& message, const QString& emoji) {
+    QDialog dialog(this);
+    dialog.setObjectName(QLatin1String("reactionAuthors"));
+    const QString title = ui("Кто поставил реакции");
+    dialog.setWindowTitle(title);
+    dialog.setStyleSheet(paletteStyle(
+        "QDialog#reactionAuthors { background: @canvas; }"
+        "QLabel { color: @text; font-weight: bold; }"
+        "QTextEdit { background: @chrome; color: @text; border: 1px solid @border; font-size: @sizepx; }"
+        "QPushButton { color: @text; background: @surface; border: 1px solid @border; }",
+        palette_, chatTextSize_));
+    QVBoxLayout* layout = new QVBoxLayout(&dialog);
+    layout->addWidget(makeLabel(title, &dialog, "reactionAuthorsHeading"));
+    QTextEdit* text = new QTextEdit(&dialog);
+    text->setObjectName(QLatin1String("reactionAuthorsText"));
+    text->setReadOnly(true);
+    text->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    QTextCursor cursor(text->document());
+    insertReactionAuthors(cursor, message.reactions, palette_, emoji, false);
+    layout->addWidget(text, 1);
+    QPushButton* close = makeButton(ui("Назад"), &dialog, "closeReactionAuthors");
+    layout->addWidget(close);
+    connect(close, SIGNAL(clicked()), &dialog, SLOT(reject()));
+    dialog.resize(qMax(270, width() - 18), qMin(360, qMax(200, height() - 36)));
     dialog.exec();
 }
 
