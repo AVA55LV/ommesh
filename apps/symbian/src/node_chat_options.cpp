@@ -1,4 +1,5 @@
 #include "node_chat_options.hpp"
+#include "window.hpp"
 
 #include <QtCore/QDateTime>
 #include <QtCore/QDir>
@@ -8,6 +9,7 @@
 #include <QtGui/QBrush>
 #include <QtGui/QDesktopServices>
 #include <QtGui/QDialog>
+#include <QtGui/QHBoxLayout>
 #include <QtGui/QImage>
 #include <QtGui/QLabel>
 #include <QtGui/QListWidget>
@@ -31,6 +33,45 @@ const int soundCount = sizeof(sounds) / sizeof(sounds[0]);
 const int backgroundCount = sizeof(backgrounds) / sizeof(backgrounds[0]);
 
 QString ui(const char* text) { return QString::fromUtf8(text); }
+
+class ChoiceDialog : public QDialog {
+public:
+    ChoiceDialog(QWidget* parent, const QString& title, const char* name,
+                 const char* listName, const char* backName, const QString& status = QString())
+        : QDialog(parent) {
+        setObjectName(QLatin1String(name));
+        setWindowTitle(title);
+        auto* body = new QVBoxLayout(this);
+        const QMargins margins = body->contentsMargins();
+        body->setContentsMargins(0, margins.top(), 0, margins.bottom());
+
+        if (!status.isEmpty()) {
+            auto* caption = new QLabel(status, this);
+            caption->setWordWrap(true);
+            caption->setContentsMargins(margins.left(), 0, margins.right(), 0);
+            body->addWidget(caption);
+        }
+        list = makeTouchList(this, margins.left());
+        list->setFrameShape(QFrame::NoFrame);
+        list->setObjectName(QLatin1String(listName));
+        list->setProperty("accessibleName", title);
+        body->addWidget(list, 1);
+
+        auto* controls = new QHBoxLayout;
+        controls->setContentsMargins(margins.left(), 0, margins.right(), 0);
+        auto* back = new QPushButton(ui("Назад"), this);
+        back->setObjectName(QLatin1String(backName));
+        back->setMinimumHeight(40);
+        controls->addWidget(back);
+        body->addLayout(controls);
+
+        connect(back, SIGNAL(clicked()), this, SLOT(reject()));
+        connect(list, SIGNAL(itemClicked(QListWidgetItem*)), this, SLOT(accept()), Qt::QueuedConnection);
+        connect(list, SIGNAL(itemActivated(QListWidgetItem*)), this, SLOT(accept()), Qt::QueuedConnection);
+    }
+
+    QListWidget* list;
+};
 
 QString storageKey(const QString& target, const char* option) {
     return QLatin1String("chatOptions/") + QString::fromLatin1(target.toUtf8().toHex()) +
@@ -214,13 +255,8 @@ bool choose(Field field, const QString& target, bool room, QWidget* parent) {
     if (global && field == Notifications)
         return false;
     QSettings settings;
-    QDialog dialog(parent);
-    dialog.setObjectName(QLatin1String("nodeChatOptions"));
-    dialog.setWindowTitle(ui(fields[field]));
-    auto* layout = new QVBoxLayout(&dialog);
-    auto* list = new QListWidget(&dialog);
-    list->setObjectName(QLatin1String("nodeChatOptionList"));
-    list->setProperty("accessibleName", dialog.windowTitle());
+    ChoiceDialog dialog(parent, ui(fields[field]), "nodeChatOptions", "nodeChatOptionList", "closeNodeChatOptions");
+    QListWidget* list = dialog.list;
     const int active = global ? fallback(settings, field, target) : selected(settings, field, target, room);
     QVector<int> values;
     if (!global)
@@ -245,14 +281,6 @@ bool choose(Field field, const QString& target, bool room, QWidget* parent) {
         if (option == active)
             list->setCurrentItem(entry);
     }
-    layout->addWidget(list);
-    auto* back = new QPushButton(ui("Назад"), &dialog);
-    back->setObjectName(QLatin1String("closeNodeChatOptions"));
-    back->setMinimumHeight(40);
-    layout->addWidget(back);
-    QObject::connect(back, SIGNAL(clicked()), &dialog, SLOT(reject()));
-    QObject::connect(list, SIGNAL(itemClicked(QListWidgetItem*)), &dialog, SLOT(accept()), Qt::QueuedConnection);
-    QObject::connect(list, SIGNAL(itemActivated(QListWidgetItem*)), &dialog, SLOT(accept()), Qt::QueuedConnection);
     dialog.resize(330, qMin(515, 68 + 44 * values.size()));
     if (dialog.exec() != QDialog::Accepted || !list->currentItem())
         return false;
@@ -287,22 +315,16 @@ bool chooseMute(const QString& target, QWidget* parent) {
 
     QSettings settings;
     const qint64 active = activeMute(settings, target);
-    QDialog dialog(parent);
-    dialog.setObjectName(QLatin1String("chatMuteOptions"));
-    dialog.setWindowTitle(ui("Без уведомлений"));
-    auto* layout = new QVBoxLayout(&dialog);
+    QString status;
     if (active) {
         const QString deadline = QDateTime::fromMSecsSinceEpoch(active).toLocalTime()
             .toString(QLatin1String("dd.MM hh:mm"));
-        const QString status = active == Forever ? ui("Уведомления отключены навсегда.") :
+        status = active == Forever ? ui("Уведомления отключены навсегда.") :
             ui("Уведомления отключены до %1.").arg(deadline);
-        auto* label = new QLabel(status, &dialog);
-        label->setWordWrap(true);
-        layout->addWidget(label);
     }
-    auto* list = new QListWidget(&dialog);
-    list->setObjectName(QLatin1String("chatMuteOptionList"));
-    list->setProperty("accessibleName", dialog.windowTitle());
+    ChoiceDialog dialog(parent, ui("Без уведомлений"), "chatMuteOptions", "chatMuteOptionList",
+                        "closeChatMuteOptions", status);
+    QListWidget* list = dialog.list;
     struct Choice { const char* title; int seconds; };
     const Choice choices[] = {
         {"Возобновить уведомления", 0}, {"На 1 час", 3600}, {"На 8 часов", 8 * 3600},
@@ -317,14 +339,6 @@ bool chooseMute(const QString& target, QWidget* parent) {
         entry->setSizeHint(QSize(0, rowHeight));
     }
     list->setMinimumHeight(list->count() * rowHeight + 2 * list->frameWidth());
-    layout->addWidget(list);
-    auto* back = new QPushButton(ui("Назад"), &dialog);
-    back->setObjectName(QLatin1String("closeChatMuteOptions"));
-    back->setMinimumHeight(40);
-    layout->addWidget(back);
-    QObject::connect(back, SIGNAL(clicked()), &dialog, SLOT(reject()));
-    QObject::connect(list, SIGNAL(itemClicked(QListWidgetItem*)), &dialog, SLOT(accept()), Qt::QueuedConnection);
-    QObject::connect(list, SIGNAL(itemActivated(QListWidgetItem*)), &dialog, SLOT(accept()), Qt::QueuedConnection);
     dialog.resize(330, dialog.minimumSizeHint().height());
     if (dialog.exec() != QDialog::Accepted || !list->currentItem())
         return false;

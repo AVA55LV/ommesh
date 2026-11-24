@@ -4,6 +4,7 @@
 #include "appearance.hpp"
 #include "client.hpp"
 #include "demo_radio.hpp"
+#include "journal_tail.hpp"
 #include "native_echo.hpp"
 #include "native_keyboard.hpp"
 #include "native_vibration.hpp"
@@ -35,8 +36,10 @@
 #include <QtGui/QPainter>
 #include <QtGui/QPushButton>
 #include <QtGui/QScrollArea>
+#include <QtGui/QScrollBar>
 #include <QtGui/QSlider>
 #include <QtGui/QTextCursor>
+#include <QtGui/QTextDocument>
 #include <QtGui/QTextEdit>
 #include <QtGui/QVBoxLayout>
 
@@ -48,6 +51,38 @@ namespace {
 QString ui(const char* utf8) {
     return QString::fromUtf8(utf8);
 }
+
+constexpr int DetailInset = 14;
+
+QVBoxLayout* insetColumn(QVBoxLayout* outer) {
+    auto* column = new QVBoxLayout;
+    column->setContentsMargins(DetailInset, 0, DetailInset, 0);
+    column->setSpacing(outer->spacing());
+    outer->addLayout(column);
+    return column;
+}
+
+void configureEdgeTextView(QTextEdit* view) {
+    view->setReadOnly(true);
+    view->setStyleSheet(QLatin1String("QTextEdit { border: 0; border-radius: 0; }"));
+    view->document()->setDocumentMargin(DetailInset);
+}
+
+class JournalView final : public QTextEdit {
+public:
+    explicit JournalView(QWidget* parent) : QTextEdit(parent) {
+        setObjectName(QLatin1String("journalEvents"));
+        configureEdgeTextView(this);
+    }
+
+protected:
+    void showEvent(QShowEvent* event) override {
+        QTextEdit::showEvent(event);
+        moveCursor(QTextCursor::End);
+        ensureCursorVisible();
+        verticalScrollBar()->setValue(verticalScrollBar()->maximum());
+    }
+};
 
 QPushButton* addSettingsButton(QBoxLayout* layout, const QString& text, QWidget* parent, const char* name = nullptr) {
     auto* button = new QPushButton(text, parent);
@@ -383,13 +418,15 @@ private:
 
 AppearancePanel::AppearancePanel(QWidget* parent) : QWidget(parent) {
     setObjectName(QLatin1String("appearancePanel"));
+    setProperty("detailScrollToEdge", true);
     const Appearance::Preferences saved = Appearance::preferences();
     theme_ = saved.theme;
     chatTextSize_ = saved.chatTextSize;
 
-    auto* layout = new QVBoxLayout(this);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(8);
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 0, 0, 0);
+    outer->setSpacing(8);
+    auto* layout = insetColumn(outer);
     auto* sizeHeading = new QHBoxLayout;
     auto* title = new QLabel(ui("Размер текста в чатах"), this);
     title->setObjectName(QLatin1String("settingsSectionTitle"));
@@ -422,7 +459,7 @@ AppearancePanel::AppearancePanel(QWidget* parent) : QWidget(parent) {
     content->setAttribute(Qt::WA_StyledBackground);
     auto* choices = new QButtonGroup(content);
     auto* grid = new QGridLayout(content);
-    grid->setContentsMargins(0, 0, 6, 0);
+    grid->setContentsMargins(DetailInset, 0, DetailInset, 0);
     grid->setHorizontalSpacing(7);
     grid->setVerticalSpacing(7);
     const Appearance::Theme themes[] = {
@@ -441,7 +478,7 @@ AppearancePanel::AppearancePanel(QWidget* parent) : QWidget(parent) {
     QScrollArea* scroll = makeTouchScrollArea(this, content);
     scroll->viewport()->setObjectName(QLatin1String("appearanceSwatches"));
     scroll->viewport()->setAttribute(Qt::WA_StyledBackground);
-    layout->addWidget(scroll, 1);
+    outer->addWidget(scroll, 1);
     connect(choices, SIGNAL(buttonClicked(int)), this, SLOT(selectTheme(int)), Qt::QueuedConnection);
     connect(slider, SIGNAL(valueChanged(int)), this, SLOT(setChatSize(int)));
     connect(slider, SIGNAL(sliderReleased()), this, SLOT(syncPreferences()));
@@ -1228,19 +1265,17 @@ void RadioSettingsPanel::chooseNotificationSound() {
 }
 
 void RadioSettingsPanel::showLog() {
-    auto* journal = new QTextEdit(this);
-    journal->setReadOnly(true);
+    auto* journal = new JournalView(this);
+    QString title = ui("Журнал");
     QFile log(QLatin1String("C:/Data/OMMeshBelle-startup.txt"));
     if (log.open(QIODevice::ReadOnly)) {
-        constexpr qint64 maximumBytes = 48 * 1024;
-        if (log.size() > maximumBytes && log.seek(log.size() - maximumBytes))
-            log.readLine();
-        journal->setPlainText(QString::fromUtf8(log.read(maximumBytes).constData()));
-        journal->moveCursor(QTextCursor::End);
+        const QStringList events = Journal::latestEvents(log);
+        journal->setPlainText(events.isEmpty() ? ui("В журнале пока нет событий.") : events.join(QLatin1String("\n")));
+        title = ui("Журнал · %1").arg(events.size());
     } else {
         journal->setPlainText(ui("Журнал запуска доступен на Nokia в C:\\Data\\OMMeshBelle-startup.txt."));
     }
-    emit detailRequested(journal, ui("Журнал"));
+    emit detailRequested(journal, title);
 }
 
 void RadioSettingsPanel::showAbout() {
@@ -1257,9 +1292,10 @@ void RadioSettingsPanel::showAbout() {
 void RadioSettingsPanel::showMessagePreferences() {
     auto* page = new QWidget(this);
     page->setObjectName(QLatin1String("messagePreferencesPanel"));
+    page->setProperty("detailScrollToEdge", true);
     auto* content = new QWidget(page);
     auto* layout = new QVBoxLayout(content);
-    layout->setContentsMargins(0, 0, 4, 4);
+    layout->setContentsMargins(DetailInset, 0, DetailInset, 4);
     layout->setSpacing(12);
     const auto option = [this](QBoxLayout* rows, const char* title, const char* key,
                                   const char* hint, bool defaultValue = false) {
@@ -1455,10 +1491,11 @@ void RadioSettingsPanel::showBlockedSenders() {
     dialog.setObjectName(QLatin1String("blockedSendersDialog"));
     dialog.setWindowTitle(ui("Заблокированные"));
     auto* outer = new QVBoxLayout(&dialog);
-    addText(outer, dialog.windowTitle(), &dialog)->setObjectName(QLatin1String("subtitle"));
+    outer->setContentsMargins(0, 10, 0, 10);
+    addText(insetColumn(outer), dialog.windowTitle(), &dialog)->setObjectName(QLatin1String("subtitle"));
     auto* content = new QWidget(&dialog);
     auto* layout = new QVBoxLayout(content);
-    layout->setContentsMargins(0, 0, 0, 0);
+    layout->setContentsMargins(DetailInset, 0, DetailInset, 0);
     layout->setSpacing(12);
     const QStringList names = client_.blockedChannelNames();
     const QMap<QString, QString> contacts = client_.blockedContacts();
@@ -1500,7 +1537,7 @@ void RadioSettingsPanel::showBlockedSenders() {
     empty->setVisible(names.isEmpty() && contacts.isEmpty());
     layout->addStretch(1);
     outer->addWidget(settingsScroll(&dialog, content), 1);
-    connectCancel(addSettingsButton(outer, ui("Назад"), &dialog, "closeBlockedSenders"), &dialog);
+    connectCancel(addSettingsButton(insetColumn(outer), ui("Назад"), &dialog, "closeBlockedSenders"), &dialog);
     const QSize available = window()->size();
     dialog.resize(qMax(240, available.width() - 22), qMax(270, available.height() - 100));
     dialog.exec();
@@ -1616,8 +1653,7 @@ void RadioSettingsPanel::updateStatus() {
     if (mapsRow_) {
         const NodeMap::Source mapMode = NodeMap::sourceFromPreference(
             preferences.value(QLatin1String("map/source"), 0).toInt());
-        setRowValue(mapsRow_, mapMode == NodeMap::Computer ? ui("Через компьютер") :
-                              mapMode == NodeMap::Loopback ? ui("На телефоне") : ui("Офлайн"));
+        setRowValue(mapsRow_, mapMode == NodeMap::Loopback ? ui("На телефоне") : ui("Офлайн"));
     }
     if (refreshRow_)
         refreshRow_->setEnabled(online && !client_.busy());
@@ -1686,7 +1722,9 @@ RadioConsoleDialog::RadioConsoleDialog(Client& client, const QString& nodeId, co
     : QDialog(parent), client_(client), nodeId_(nodeId), loginOnly_(loginOnly) {
     setWindowTitle(title);
     resize(338, loginOnly_ ? 170 : 425);
-    auto* layout = new QVBoxLayout(this);
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(0, 10, 0, 10);
+    auto* layout = insetColumn(outer);
     state_ = addText(layout, loginOnly_ ? ui("Введите пароль узла.") : nodeId_.isEmpty()
         ? ui("Команды подключённой рации") : ui("Войдите как администратор узла."), this);
     auto* signIn = new QHBoxLayout;
@@ -1701,8 +1739,9 @@ RadioConsoleDialog::RadioConsoleDialog(Client& client, const QString& nodeId, co
     if (!loginOnly_) {
         output_ = new QTextEdit(this);
         output_->setObjectName(QLatin1String("consoleOutput"));
-        output_->setReadOnly(true);
-        layout->addWidget(output_, 1);
+        configureEdgeTextView(output_);
+        outer->addWidget(output_, 1);
+        layout = insetColumn(outer);
         command_ = new QLineEdit(this);
         command_->setObjectName(QLatin1String("consoleCommand"));
         command_->setPlaceholderText(ui("Команда"));

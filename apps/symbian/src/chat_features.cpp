@@ -11,6 +11,7 @@
 #include <QtCore/QCryptographicHash>
 #include <QtCore/QElapsedTimer>
 #include <QtCore/QHash>
+#include <QtCore/QMargins>
 #include <QtCore/QPointer>
 #include <QtCore/QSet>
 #include <QtCore/QSettings>
@@ -69,6 +70,7 @@ const int originalEmojiCount = sizeof(emojiCodes) / sizeof(emojiCodes[0]);
 const int extraEmojiCount = sizeof(extraEmojiLookup) / sizeof(extraEmojiLookup[0]);
 const int emojiTotal = originalEmojiCount + extraEmojiCount;
 const int spriteSide = 24;
+const int chatSidePadding = 8;
 const int originalEmoji = QTextFormat::UserProperty + 6;
 const int messageIndex = QTextFormat::UserProperty + 7;
 const int blockedRunMarker = QTextFormat::UserProperty + 31;
@@ -482,10 +484,35 @@ void maskBubbleCorners(QPainter& painter, const QRectF& bubble, const QBrush& ba
     painter.fillPath(corners, backdrop);
 }
 
-class MessageDetailsText : public QTextEdit {
+QVBoxLayout* paddedRows(QVBoxLayout& column, int left, int right) {
+    auto* rows = new QVBoxLayout;
+    rows->setContentsMargins(left, 0, right, 0);
+    rows->setSpacing(column.spacing());
+    column.addLayout(rows);
+    return rows;
+}
+
+QMargins dialogContentMargins(QVBoxLayout& layout) {
+    const QMargins margins = layout.contentsMargins();
+    layout.setContentsMargins(0, margins.top(), 0, margins.bottom());
+    return margins;
+}
+
+class ChatDialogText : public QTextEdit {
 public:
-    MessageDetailsText(const QColor& backdrop, QWidget* parent)
-        : QTextEdit(parent), backdrop_(backdrop) {}
+    ChatDialogText(const QMargins& margins, QWidget* parent) : QTextEdit(parent) {
+        setFrameStyle(QFrame::NoFrame);
+        setReadOnly(true);
+        setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        // Preserve the message padding previously provided by the layout and frame.
+        setViewportMargins(margins.left() + 1, 1, margins.right() + 1, 1);
+    }
+};
+
+class MessageDetailsText : public ChatDialogText {
+public:
+    MessageDetailsText(const QColor& backdrop, const QMargins& margins, QWidget* parent)
+        : ChatDialogText(margins, parent), backdrop_(backdrop) {}
 
     void setBubble(QTextFrame* frame) {
         bubble_ = frame;
@@ -1074,6 +1101,7 @@ public:
         setTextInteractionFlags(Qt::NoTextInteraction);
         setFocusPolicy(Qt::StrongFocus);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+        setViewportMargins(chatSidePadding, 0, chatSidePadding, 0);
         document()->setDocumentMargin(4);
         receiptClock_.start();
     }
@@ -1616,8 +1644,9 @@ ChatView::ChatView(QWidget* parent)
     setProperty(NativeKeyboard::LayoutAnchor, true);
 
     QVBoxLayout* page = new QVBoxLayout(this);
-    page->setContentsMargins(8, 5, 8, 6);
+    page->setContentsMargins(0, 5, 0, 6);
     page->setSpacing(5);
+    QVBoxLayout* header = paddedRows(*page, chatSidePadding, chatSidePadding);
     QHBoxLayout* top = new QHBoxLayout;
     top->setSpacing(7);
     QPushButton* back = makeButton(ui("Чаты"), this, "chatBack");
@@ -1647,7 +1676,7 @@ ChatView::ChatView(QWidget* parent)
     top->addLayout(headings, 1);
     top->addWidget(optionsButton_);
     top->addWidget(searchButton_);
-    page->addLayout(top);
+    header->addLayout(top);
 
     searchRow_ = new QWidget(this);
     QHBoxLayout* search = new QHBoxLayout(searchRow_);
@@ -1665,7 +1694,7 @@ ChatView::ChatView(QWidget* parent)
     search->addWidget(searchInput_, 1);
     search->addWidget(searchStatus_);
     search->addWidget(searchNext_);
-    page->addWidget(searchRow_);
+    header->addWidget(searchRow_);
     searchRow_->hide();
     QShortcut* closeSearch = new QShortcut(QKeySequence(Qt::Key_Escape), searchRow_);
     closeSearch->setContext(Qt::WidgetWithChildrenShortcut);
@@ -1678,6 +1707,7 @@ ChatView::ChatView(QWidget* parent)
     connect(history_->verticalScrollBar(), SIGNAL(sliderReleased()),
             this, SLOT(applyDeferredMessages()), Qt::QueuedConnection);
     page->addWidget(history_, 1);
+    QVBoxLayout* footer = paddedRows(*page, chatSidePadding, chatSidePadding);
     quotePreview_ = new QWidget(this);
     QHBoxLayout* preview = new QHBoxLayout(quotePreview_);
     preview->setContentsMargins(0, 0, 0, 0);
@@ -1696,11 +1726,11 @@ ChatView::ChatView(QWidget* parent)
     clearQuote->setFocusPolicy(Qt::TabFocus);
     preview->addWidget(quoteText_, 1);
     preview->addWidget(clearQuote);
-    page->addWidget(quotePreview_);
+    footer->addWidget(quotePreview_);
 
     byteLimit_ = makeLabel(QString(), this, "chatByteLimit");
     byteLimit_->setAlignment(Qt::AlignRight);
-    page->addWidget(byteLimit_);
+    footer->addWidget(byteLimit_);
 
     QHBoxLayout* input = new QHBoxLayout;
     input->setSpacing(5);
@@ -1729,7 +1759,7 @@ ChatView::ChatView(QWidget* parent)
     input->addWidget(emojiButton_);
     input->addWidget(attachmentButton_);
     input->addWidget(sendButton_);
-    page->addLayout(input);
+    footer->addLayout(input);
 
     connect(back, SIGNAL(clicked()), this, SIGNAL(backRequested()));
     connect(pinAction_, SIGNAL(triggered(bool)), this, SIGNAL(pinRequested()));
@@ -2299,13 +2329,13 @@ void ChatView::showDetails(const ChatMessage& message) {
     dialog.setWindowTitle(ui("Подробности сообщения"));
     dialog.setStyleSheet(paletteStyle(
         "QDialog#messageDetails { background: @canvas; }"
-        "QTextEdit { background: @chrome; color: @text; border: 1px solid @border; font-size: @sizepx; }"
+        "QTextEdit { background: @chrome; color: @text; border: none; font-size: @sizepx; }"
         "QPushButton { color: @text; background: @surface; border: 1px solid @border; }",
         palette_, chatTextSize_));
     QVBoxLayout* layout = new QVBoxLayout(&dialog);
-    auto* text = new MessageDetailsText(palette_.chrome, &dialog);
-    text->setReadOnly(true);
-    text->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
+    const QMargins margins = dialogContentMargins(*layout);
+    auto* text = new MessageDetailsText(palette_.chrome, margins, &dialog);
+    text->setObjectName(QLatin1String("messageDetailsText"));
     QTextCursor cursor(text->document());
     text->setBubble(insertMessage(cursor, message, 0, MessageText::preferences(), palette_, chatTextSize_));
     insertReactionAuthors(cursor, message.reactions, palette_, QString(), true);
@@ -2321,7 +2351,7 @@ void ChatView::showDetails(const ChatMessage& message) {
     cursor.insertText(ui("%1 байт UTF-8").arg(message.text.toUtf8().size()), format);
     layout->addWidget(text, 1);
     QPushButton* close = makeButton(ui("Назад"), &dialog, "closeMessageDetails");
-    layout->addWidget(close);
+    paddedRows(*layout, margins.left(), margins.right())->addWidget(close);
     connect(close, SIGNAL(clicked()), &dialog, SLOT(reject()));
     dialog.resize(qMax(270, width() - 18), qMin(420, qMax(250, height() - 36)));
     dialog.exec();
@@ -2335,20 +2365,19 @@ void ChatView::showReactionAuthors(const ChatMessage& message, const QString& em
     dialog.setStyleSheet(paletteStyle(
         "QDialog#reactionAuthors { background: @canvas; }"
         "QLabel { color: @text; font-weight: bold; }"
-        "QTextEdit { background: @chrome; color: @text; border: 1px solid @border; font-size: @sizepx; }"
+        "QTextEdit { background: @chrome; color: @text; border: none; font-size: @sizepx; }"
         "QPushButton { color: @text; background: @surface; border: 1px solid @border; }",
         palette_, chatTextSize_));
     QVBoxLayout* layout = new QVBoxLayout(&dialog);
-    layout->addWidget(makeLabel(title, &dialog, "reactionAuthorsHeading"));
-    QTextEdit* text = new QTextEdit(&dialog);
+    const QMargins margins = dialogContentMargins(*layout);
+    paddedRows(*layout, margins.left(), margins.right())->addWidget(makeLabel(title, &dialog, "reactionAuthorsHeading"));
+    auto* text = new ChatDialogText(margins, &dialog);
     text->setObjectName(QLatin1String("reactionAuthorsText"));
-    text->setReadOnly(true);
-    text->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     QTextCursor cursor(text->document());
     insertReactionAuthors(cursor, message.reactions, palette_, emoji, false);
     layout->addWidget(text, 1);
     QPushButton* close = makeButton(ui("Назад"), &dialog, "closeReactionAuthors");
-    layout->addWidget(close);
+    paddedRows(*layout, margins.left(), margins.right())->addWidget(close);
     connect(close, SIGNAL(clicked()), &dialog, SLOT(reject()));
     dialog.resize(qMax(270, width() - 18), qMin(360, qMax(200, height() - 36)));
     dialog.exec();

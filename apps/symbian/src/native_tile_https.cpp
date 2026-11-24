@@ -22,6 +22,7 @@
 #include "symbian/net/byte_stream.h"
 
 #include "native_tile_ca.hpp"
+#include "native_topo_ca.hpp"
 #include "native_preview_ca.hpp"
 #include "native_attachment_ca.hpp"
 
@@ -30,14 +31,28 @@ namespace {
 namespace http = symbian::http;
 namespace net = symbian::api::connectivity;
 
-constexpr char kHost[] = "tile.openstreetmap.org";
 constexpr char kPreviewHost[] = "preview.ommesh.ru";
-constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.38 (+https://github.com/cm4ker/ommesh)";
+constexpr char kUserAgent[] = "OMMesh-Belle-SIS/0.2.41 (+https://github.com/cm4ker/ommesh)";
 constexpr int kMaximumTileBytes = 160 * 1024;
 constexpr std::size_t kNativeIoLimit = 32 * 1024;
 constexpr char kPng256Header[] =
     "\x89" "PNG\r\n\x1a\n\x00\x00\x00\x0dIHDR"
     "\x00\x00\x01\x00\x00\x00\x01\x00";
+
+struct TileOrigin {
+    const char* host;
+    const char* name;
+    const char* path;
+    const char* roots;
+    std::size_t rootsSize;
+};
+
+constexpr TileOrigin kStandard = {
+    "tile.openstreetmap.org", "OpenStreetMap", "/", kTileRoots, sizeof(kTileRoots)
+};
+constexpr TileOrigin kTopographic = {
+    "tile.openmaps.fr", "OpenTopoMap-R", "/opentopomap/", kTopoRoots, sizeof(kTopoRoots)
+};
 
 bool cancelled(const QAtomicInt* flag) {
     return flag && const_cast<QAtomicInt*>(flag)->fetchAndAddAcquire(0) != 0;
@@ -224,18 +239,20 @@ bool resolverError(const absl::Status& status) {
     return status.message().find("Resolve TCP hostname:") == 0;
 }
 
-TileHttpsResult tileConnectFailure(const absl::Status& status) {
+TileHttpsResult tileFailure(const QString& error) {
     TileHttpsResult result;
-    if (resolverError(status)) {
-        result.error = absl::IsDeadlineExceeded(status)
-            ? QString::fromUtf8("DNS: нет ответа для OpenStreetMap")
-            : QString::fromUtf8("DNS: не найден адрес OpenStreetMap");
-    } else if (absl::IsDeadlineExceeded(status)) {
-        result.error = QString::fromUtf8("Тайм-аут соединения с OpenStreetMap");
-    } else {
-        return failure(status);
-    }
+    result.error = error;
     return result;
+}
+
+TileHttpsResult tileConnectFailure(const absl::Status& status, const QString& provider) {
+    if (resolverError(status))
+        return tileFailure((absl::IsDeadlineExceeded(status)
+            ? QString::fromUtf8("DNS не отвечает для %1")
+            : QString::fromUtf8("DNS: не найден адрес %1")).arg(provider));
+    return tileFailure((absl::IsDeadlineExceeded(status)
+        ? QString::fromUtf8("Тайм-аут соединения с %1")
+        : QString::fromUtf8("Нет TCP-соединения с %1")).arg(provider));
 }
 
 QByteArray header(const http::Headers& headers, const char* name) {
@@ -264,28 +281,32 @@ TileHttpsResult fetchOsmTile(const TileHttpsRequest& request) {
     if (cancelled(request.cancelled))
         return failure(absl::CancelledError("Tile request cancelled"));
 
+    const bool topographic = request.provider == TileProvider::OpenTopoMapR;
+    const TileOrigin& origin = topographic ? kTopographic : kStandard;
+    const QString provider = QString::fromLatin1(origin.name);
     const auto start = absl::Now();
     const auto deadline = start + absl::Seconds(19);
     const auto tcpDeadline = start + absl::Seconds(8);
-    auto tcp = net::TcpClient::ConnectHost(kHost, 443, tcpDeadline);
+    auto tcp = net::TcpClient::ConnectHost(origin.host, 443, tcpDeadline);
     if (!tcp.ok() && absl::IsNotFound(tcp.status()) && resolverError(tcp.status()) &&
             !cancelled(request.cancelled) && tcpDeadline - absl::Now() >= absl::Milliseconds(500)) {
         // Symbian may briefly return KErrNotFound when the bearer first starts.
         absl::SleepFor(absl::Milliseconds(250));
         if (!cancelled(request.cancelled))
-            tcp = net::TcpClient::ConnectHost(kHost, 443, tcpDeadline);
+            tcp = net::TcpClient::ConnectHost(origin.host, 443, tcpDeadline);
     }
     if (!tcp.ok())
-        return tileConnectFailure(tcp.status());
+        return tileConnectFailure(tcp.status(), provider);
     auto tls = std::make_unique<TileTlsStream>(std::move(*tcp), request.cancelled);
-    auto status = tls->open(kHost, kTileRoots, sizeof(kTileRoots), request.allowUntrustedCa, deadline);
+    auto status = tls->open(origin.host, origin.roots, origin.rootsSize,
+                            request.allowUntrustedCa && !topographic, deadline);
     if (!status.ok())
-        return failure(status);
+        return tileFailure(QString::fromUtf8("Ошибка TLS для %1").arg(provider));
 
     http::RequestHead outbound;
     outbound.scheme = "https";
-    outbound.authority = kHost;
-    outbound.path = "/" + std::to_string(request.z) + "/" + std::to_string(request.x) +
+    outbound.authority = origin.host;
+    outbound.path = origin.path + std::to_string(request.z) + "/" + std::to_string(request.x) +
                     "/" + std::to_string(request.y) + ".png";
     outbound.headers = {
         {"user-agent", kUserAgent},
@@ -309,12 +330,15 @@ TileHttpsResult fetchOsmTile(const TileHttpsRequest& request) {
         return failure(status);
 
     const auto& response = (*exchange)->response();
-    if (response.status == 200 && http::GetHeader(response.headers, "x-blocked"))
-        return failure(absl::UnavailableError("OpenStreetMap declined this tile request"));
+    if (response.status == 200 && http::GetHeader(response.headers, "x-blocked")) {
+        TileHttpsResult blocked;
+        blocked.status = 403;
+        return blocked;
+    }
     if (response.status != 200 && (response.status != 304 || !conditional) &&
             (response.status < 400 || response.status > 599)) {
-        return failure(absl::UnavailableError("Unexpected OpenStreetMap response " +
-                                               std::to_string(response.status)));
+        return tileFailure(QString::fromUtf8("%1: неожиданный ответ HTTP %2")
+                           .arg(provider).arg(response.status));
     }
 
     TileHttpsResult result;
@@ -328,10 +352,10 @@ TileHttpsResult fetchOsmTile(const TileHttpsRequest& request) {
     if (result.status != 200)
         return result;
     if (result.contentType.trimmed().toLower() != "image/png")
-        return failure(absl::DataLossError("OpenStreetMap response is not a PNG tile"));
+        return tileFailure(QString::fromUtf8("%1 не вернул плитку PNG").arg(provider));
     const auto encoding = header(response.headers, "content-encoding").trimmed().toLower();
     if (!encoding.isEmpty() && encoding != "identity")
-        return failure(absl::DataLossError("OpenStreetMap sent an unsupported content encoding"));
+        return tileFailure(QString::fromUtf8("Неподдерживаемое сжатие плитки"));
 
     while (!cancelled(request.cancelled)) {
         auto bytes = (*exchange)->Read(deadline);
@@ -339,19 +363,19 @@ TileHttpsResult fetchOsmTile(const TileHttpsRequest& request) {
             return failure(bytes.status());
         if (!bytes->has_value()) {
             if (!result.body.startsWith(QByteArray::fromRawData(kPng256Header, sizeof(kPng256Header) - 1)))
-                return failure(absl::DataLossError("Invalid PNG tile signature or dimensions"));
+                return tileFailure(QString::fromUtf8("Сервер не вернул плитку PNG 256 × 256"));
             return result;
         }
         const auto size = (**bytes).size();
         if (size > static_cast<std::size_t>(kMaximumTileBytes - result.body.size()))
-            return failure(absl::ResourceExhaustedError("OpenStreetMap tile exceeds size limit"));
+            return tileFailure(QString::fromUtf8("Плитка карты слишком большая"));
         result.body.append((**bytes).data(), static_cast<int>(size));
     }
     return failure(absl::CancelledError("Tile request cancelled"));
 #else
     Q_UNUSED(request);
     TileHttpsResult result;
-    result.error = QString::fromLatin1("The native OpenStreetMap transport requires Symbian Belle");
+    result.error = QString::fromLatin1("The native tile transport requires Symbian Belle");
     return result;
 #endif
 }

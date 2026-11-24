@@ -198,6 +198,7 @@ struct LocalTileProxy::State final : QTcpServer {
     QByteArray received;
     QString error;
     qint64 peerDeadline = 0;
+    TileProvider provider = TileProvider::OpenStreetMap;
     bool allowUntrustedCa = false;
     bool expectsTile = false;
     bool sending = false;
@@ -328,6 +329,7 @@ struct LocalTileProxy::State final : QTcpServer {
             respond(503);
             return;
         }
+        request.provider = provider;
         request.allowUntrustedCa = allowUntrustedCa;
         expectsTile = true;
         worker = new TileWorker(std::move(request));
@@ -391,11 +393,11 @@ struct LocalTileProxy::State final : QTcpServer {
 LocalTileProxy::LocalTileProxy() : state_(new State) {}
 LocalTileProxy::~LocalTileProxy() = default;
 
-bool LocalTileProxy::start(bool allowUntrustedCa, QString* error) {
+bool LocalTileProxy::start(TileProvider provider, bool allowUntrustedCa, QString* error) {
     if (error) {
         error->clear();
     }
-    if (running() && state_->allowUntrustedCa == allowUntrustedCa) {
+    if (running() && state_->provider == provider && state_->allowUntrustedCa == allowUntrustedCa) {
         return true;
     }
     stop();
@@ -408,6 +410,7 @@ bool LocalTileProxy::start(bool allowUntrustedCa, QString* error) {
         }
         return false;
     }
+    state_->provider = provider;
     state_->allowUntrustedCa = allowUntrustedCa;
     return true;
 }
@@ -418,6 +421,10 @@ void LocalTileProxy::stop() {
 
 bool LocalTileProxy::running() const {
     return state_->isListening();
+}
+
+bool LocalTileProxy::ready() const {
+    return running() && !state_->worker;
 }
 
 QString LocalTileProxy::baseUrl() const {

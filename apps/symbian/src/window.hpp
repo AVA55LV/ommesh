@@ -22,6 +22,7 @@ class NodeMap;
 class RadioSettingsPanel;
 class QAction;
 class QButtonGroup;
+class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -33,7 +34,7 @@ class QToolButton;
 class QVBoxLayout;
 
 QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content);
-QListWidget* makeTouchList(QWidget* parent);
+QListWidget* makeTouchList(QWidget* parent, int horizontalInset = 0);
 QWidget* showCompactSheet(QWidget* owner, QWidget* content, const QString& title,
                           const char* closeSlot, const std::function<void()>& close);
 void dismissCompactSheet(QWidget* sheet, bool animate);
@@ -147,6 +148,7 @@ private:
     ChatView* chatPage_ = nullptr;
     QWidget* detailPage_ = nullptr;
     QVBoxLayout* detailLayout_ = nullptr;
+    QHBoxLayout* detailHeading_ = nullptr;
     QLabel* detailTitle_ = nullptr;
     QPointer<QWidget> detailContent_;
     QPointer<QWidget> pendingDetail_;

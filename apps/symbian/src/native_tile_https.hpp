@@ -6,6 +6,8 @@
 #include <QtCore/QString>
 #include <QtCore/QUrl>
 
+enum class TileProvider { OpenStreetMap, OpenTopoMapR };
+
 struct TileHttpsRequest {
     int z = 0;
     int x = 0;
@@ -14,6 +16,7 @@ struct TileHttpsRequest {
     QByteArray lastModified;
     bool allowUntrustedCa = false;
     const QAtomicInt* cancelled = nullptr;
+    TileProvider provider = TileProvider::OpenStreetMap;
 };
 
 struct TileHttpsResult {

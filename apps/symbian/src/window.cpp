@@ -56,6 +56,7 @@ enum ItemData { ItemId = Qt::UserRole, ItemDetail, ItemStamp, ItemUnread,
                 ItemChannel, ItemPinned, ItemRole, ItemPinnedBoundary };
 enum ChatOption { ChatProfile, ChatCopyName, ChatMarkRead, ChatMute, ChatPin, ChatErase };
 const int ChatRoomRole = -1;
+const int pageInset = 14;
 
 QString ui(const char* utf8) { return QString::fromUtf8(utf8); }
 
@@ -77,9 +78,17 @@ QPushButton* button(const QString& text, QWidget* parent, bool primary = false) 
 
 QVBoxLayout* pageLayout(QWidget* parent) {
     QVBoxLayout* layout = new QVBoxLayout(parent);
-    layout->setContentsMargins(14, 12, 14, 10);
+    layout->setContentsMargins(pageInset, 12, pageInset, 10);
     layout->setSpacing(8);
     return layout;
+}
+
+QVBoxLayout* insetColumn(QVBoxLayout* page, int inset) {
+    auto* column = new QVBoxLayout;
+    column->setContentsMargins(inset, 0, inset, 0);
+    column->setSpacing(page->spacing());
+    page->addLayout(column);
+    return column;
 }
 
 QLineEdit* searchBox(const QString& hint, QWidget* parent) {
@@ -260,10 +269,11 @@ QSet<QString> roomIds(const Client& client) {
 
 class TouchList : public QListWidget {
 public:
-    explicit TouchList(QWidget* parent) : QListWidget(parent) {
+    explicit TouchList(QWidget* parent, int horizontalInset = 0) : QListWidget(parent) {
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
         setUniformItemSizes(true);
+        setViewportMargins(horizontalInset, 0, horizontalInset, 0);
     }
 
 protected:
@@ -393,7 +403,8 @@ protected:
 
 class TouchScrollArea : public QScrollArea {
 public:
-    explicit TouchScrollArea(QWidget* parent) : QScrollArea(parent) {
+    explicit TouchScrollArea(QWidget* parent, bool overlayVerticalBar = false)
+        : QScrollArea(parent), overlayVerticalBar_(overlayVerticalBar) {
         setWidgetResizable(true);
         setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
         setVerticalScrollBar(new TouchScrollBar(this));
@@ -406,6 +417,19 @@ public:
     }
 
 protected:
+    bool viewportEvent(QEvent* event) override {
+        if (overlayVerticalBar_ && event->type() == QEvent::Resize) {
+            QScrollBar* bar = verticalScrollBar();
+            const int overlap = bar->isVisibleTo(this) ? bar->sizeHint().width() : 0;
+            if (overlap != verticalBarOverlap_) {
+                // Qt raises the scrollbar above the viewport. Restore the width it reserved.
+                verticalBarOverlap_ = overlap;
+                setViewportMargins(0, 0, -overlap, 0);
+            }
+        }
+        return QScrollArea::viewportEvent(event);
+    }
+
     bool eventFilter(QObject* watched, QEvent* event) override {
         // Detail pages are constructed under Settings and later move to their own viewport.
         QWidget* source = qobject_cast<QWidget*>(watched);
@@ -498,6 +522,8 @@ private:
 
     QPointer<QAbstractButton> button_;
     QPoint previous_;
+    const bool overlayVerticalBar_;
+    int verticalBarOverlap_ = 0;
     bool pressed_ = false;
     bool dragging_ = false;
 };
@@ -619,8 +645,8 @@ private:
     }
 };
 
-TouchList* makeList(QWidget* parent, const QString& name) {
-    TouchList* list = new TouchList(parent);
+TouchList* makeList(QWidget* parent, const QString& name, int horizontalInset) {
+    TouchList* list = new TouchList(parent, horizontalInset);
     list->setProperty("accessibleName", name);
     list->setItemDelegate(new RowPainter(list));
     return list;
@@ -752,8 +778,8 @@ QString themeStyle(const Appearance::Palette& colors) {
         "QScrollBar:horizontal { height: 18px; }"
         // Paint 3 px of the thumb inside a wider touch target.
         "QScrollBar::handle { background: @scrollHandle@; border-radius: 1px; }"
-        "QScrollBar::handle:vertical { margin: 0 7px 0 8px; min-height: 35px; }"
-        "QScrollBar::handle:horizontal { margin: 8px 0 7px; min-width: 35px; }"
+        "QScrollBar::handle:vertical { margin: 0 1px 0 14px; min-height: 35px; }"
+        "QScrollBar::handle:horizontal { margin: 14px 0 1px 0; min-width: 35px; }"
         "QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }"
         "QScrollBar::add-line, QScrollBar::sub-line { width: 0; height: 0; }"
         "QPushButton { background: @surface@; color: @text@; border: 1px solid @border@;"
@@ -810,8 +836,8 @@ QScrollArea* makeTouchScrollArea(QWidget* parent, QWidget* content) {
     return scroll;
 }
 
-QListWidget* makeTouchList(QWidget* parent) {
-    return new TouchList(parent);
+QListWidget* makeTouchList(QWidget* parent, int horizontalInset) {
+    return new TouchList(parent, horizontalInset);
 }
 
 namespace {
@@ -1034,13 +1060,14 @@ public:
           fullHeight_(fullHeight || title.isEmpty()) {
         setObjectName(QLatin1String("networkOverlay"));
         auto* layout = new QVBoxLayout(card_);
-        layout->setContentsMargins(12, 7, 12, 10);
+        layout->setContentsMargins(0, 7, 0, 10);
         layout->setSpacing(6);
         QWidget* grip = surface(card_, "networkSheetGrip");
         grip->setFixedSize(34, 4);
         grip->setAttribute(Qt::WA_TransparentForMouseEvents);
         layout->addWidget(grip, 0, Qt::AlignHCenter);
         auto* heading = new QHBoxLayout;
+        heading->setContentsMargins(12, 0, 12, 0);
         closeButton_ = button(title.isEmpty() ? QString() : ui("Готово"), card_);
         closeButton_->setObjectName(QLatin1String("networkSheetClose"));
         if (title.isEmpty()) {
@@ -1060,6 +1087,9 @@ public:
         heading->addWidget(closeButton_);
         layout->addLayout(heading);
         desiredHeight_ = content->sizeHint().height() + 70;
+        const QMargins padding = content->contentsMargins();
+        content->setContentsMargins(padding.left() + 12, padding.top(),
+                                    padding.right() + 12, padding.bottom());
         QScrollArea* scroll = makeTouchScrollArea(card_, content);
         scroll->setObjectName(QLatin1String("networkSheetScroll"));
         scroll->viewport()->setObjectName(QLatin1String("networkSheetViewport"));
@@ -1312,7 +1342,8 @@ QWidget* ClientWindow::makeTabs() {
 QWidget* ClientWindow::makeChatsPage() {
     QWidget* page = surface(tabPages_, "pane");
     QVBoxLayout* layout = pageLayout(page);
-    layout->setContentsMargins(14, 12, 14, 0);
+    layout->setContentsMargins(0, 12, 0, 0);
+    auto* header = insetColumn(layout, pageInset);
     QHBoxLayout* heading = new QHBoxLayout;
     heading->addWidget(label(ui("Чаты"), page, "heading"));
     QVBoxLayout* radioSummary = new QVBoxLayout;
@@ -1331,7 +1362,7 @@ QWidget* ClientWindow::makeChatsPage() {
     add->setFixedWidth(48);
     add->setProperty("accessibleName", ui("Новый чат"));
     heading->addWidget(add);
-    layout->addLayout(heading);
+    header->addLayout(heading);
 
     chatSearch_ = searchBox(ui("Найти чат"), page);
     QHBoxLayout* searchControls = new QHBoxLayout;
@@ -1342,7 +1373,7 @@ QWidget* ClientWindow::makeChatsPage() {
     clearChatSearch_->setProperty("accessibleName", ui("Очистить поиск"));
     clearChatSearch_->setEnabled(false);
     searchControls->addWidget(clearChatSearch_);
-    layout->addLayout(searchControls);
+    header->addLayout(searchControls);
     QHBoxLayout* controls = new QHBoxLayout;
     chatCount_ = label(QString(), page, "muted");
     chatCount_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
@@ -1352,17 +1383,17 @@ QWidget* ClientWindow::makeChatsPage() {
     chatFilter_->setProperty("accessibleName", ui("Фильтр чатов"));
     chatFilter_->setMinimumHeight(38);
     controls->addWidget(chatFilter_);
-    layout->addLayout(controls);
+    header->addLayout(controls);
     emptyChats_ = label(QString(), page, "muted");
     emptyChats_->setWordWrap(true);
     emptyChats_->setAlignment(Qt::AlignCenter);
-    layout->addWidget(emptyChats_);
-    targets_ = makeList(page, ui("Чаты"));
+    header->addWidget(emptyChats_);
+    targets_ = makeList(page, ui("Чаты"), pageInset);
     targets_->setObjectName(QLatin1String("chatTargets"));
     targets_->setContextMenuPolicy(Qt::CustomContextMenu);
     layout->addWidget(targets_, 1);
     connectFromChats_ = button(ui("Подключить рацию"), page, true);
-    layout->addWidget(connectFromChats_);
+    insetColumn(layout, pageInset)->addWidget(connectFromChats_);
     layout->addSpacing(4);
     connect(add, SIGNAL(clicked()), this, SLOT(openNewChat()));
     connect(connectFromChats_, SIGNAL(clicked()), this, SLOT(openConnection()));
@@ -1382,8 +1413,9 @@ QWidget* ClientWindow::makeNetworkPage() {
     map_->setTrace([this](const char* step, int code) { client_.traceConnection(step, code); });
     QWidget* listPage = surface(networkPage_, "networkNodePane");
     QVBoxLayout* listLayout = new QVBoxLayout(listPage);
-    listLayout->setContentsMargins(10, 8, 10, 0);
+    listLayout->setContentsMargins(0, 8, 0, 0);
     listLayout->setSpacing(4);
+    auto* header = insetColumn(listLayout, 10);
     QHBoxLayout* searchRow = new QHBoxLayout;
     searchRow->setSpacing(6);
     nodeSearch_ = searchBox(ui("Найти узел"), listPage);
@@ -1397,15 +1429,15 @@ QWidget* ClientWindow::makeNetworkPage() {
     nodeFiltersButton_->setProperty("accessibleName", ui("Фильтры и порядок узлов"));
     nodeFiltersButton_->setToolTip(ui("Фильтры и порядок узлов"));
     searchRow->addWidget(nodeFiltersButton_);
-    listLayout->addLayout(searchRow);
+    header->addLayout(searchRow);
     nodeCount_ = label(QString(), listPage, "muted");
     nodeCount_->setContentsMargins(4, 0, 0, 0);
-    listLayout->addWidget(nodeCount_);
+    header->addWidget(nodeCount_);
     emptyNodes_ = label(QString(), listPage, "muted");
     emptyNodes_->setWordWrap(true);
     emptyNodes_->setAlignment(Qt::AlignCenter);
-    listLayout->addWidget(emptyNodes_);
-    nodes_ = makeList(listPage, ui("Узлы"));
+    header->addWidget(emptyNodes_);
+    nodes_ = makeList(listPage, ui("Узлы"), 10);
     nodes_->setObjectName(QLatin1String("networkNodes"));
     listLayout->addWidget(nodes_, 1);
     networkPage_->setContent(map_, listPage);
@@ -1424,7 +1456,8 @@ QWidget* ClientWindow::makeNetworkPage() {
 QWidget* ClientWindow::makeSettingsPage() {
     QWidget* page = surface(tabPages_, "pane");
     QVBoxLayout* layout = pageLayout(page);
-    layout->setContentsMargins(12, 8, 12, 0);
+    layout->setContentsMargins(0, 8, 0, 0);
+    auto* header = insetColumn(layout, 12);
     settingsReconnectBanner_ = surface(page, "settingsReconnectBanner");
     auto* bannerLayout = new QHBoxLayout(settingsReconnectBanner_);
     bannerLayout->setContentsMargins(9, 5, 6, 5);
@@ -1436,7 +1469,7 @@ QWidget* ClientWindow::makeSettingsPage() {
     settingsRetryNow_ = button(ui("Попробовать сейчас"), settingsReconnectBanner_);
     settingsRetryNow_->setObjectName(QLatin1String("settingsRetryNow"));
     bannerLayout->addWidget(settingsRetryNow_);
-    layout->addWidget(settingsReconnectBanner_);
+    header->addWidget(settingsReconnectBanner_);
     settingsReconnectBanner_->hide();
     auto* heading = new QHBoxLayout;
     QLabel* title = label(ui("Настройки"), page, "heading");
@@ -1450,16 +1483,16 @@ QWidget* ClientWindow::makeSettingsPage() {
     settingsSearchButton_->setIconSize(QSize(22, 22));
     settingsSearchButton_->setIcon(SettingsIcons::icon(SettingsIcons::Search, Appearance::paletteFor(this).muted));
     heading->addWidget(settingsSearchButton_);
-    layout->addLayout(heading);
+    header->addLayout(heading);
     settingsSearch_ = searchBox(ui("Найти настройку"), page);
     settingsSearch_->setObjectName(QLatin1String("settingsSearch"));
-    layout->addWidget(settingsSearch_);
+    header->addWidget(settingsSearch_);
     settingsSearch_->hide();
-    TouchScrollArea* scroll = new TouchScrollArea(page);
+    TouchScrollArea* scroll = new TouchScrollArea(page, true);
     settingsScroll_ = scroll;
     QWidget* content = surface(scroll, "pane");
     QVBoxLayout* settings = new QVBoxLayout(content);
-    settings->setContentsMargins(0, 0, 2, 15);
+    settings->setContentsMargins(12, 0, 12, 15);
     settings->setSpacing(16);
 
     QWidget* card = surface(content, "nodeCard");
@@ -1538,7 +1571,9 @@ QWidget* ClientWindow::makeConnectionPage() {
     QWidget* page = surface(pages_, "pane");
     page->setObjectName(QLatin1String("connectionPage"));
     QVBoxLayout* layout = pageLayout(page);
+    layout->setContentsMargins(0, 12, 0, 10);
     QHBoxLayout* heading = new QHBoxLayout;
+    heading->setContentsMargins(pageInset, 0, pageInset, 0);
     connectionBack_ = button(QString(), page);
     connectionBack_->setObjectName(QLatin1String("connectionBack"));
     connectionBack_->setProperty("accessibleName", ui("Назад"));
@@ -1550,7 +1585,7 @@ QWidget* ClientWindow::makeConnectionPage() {
     layout->addLayout(heading);
     QWidget* content = surface(page, "pane");
     auto* fields = new QVBoxLayout(content);
-    fields->setContentsMargins(0, 0, 2, 0);
+    fields->setContentsMargins(pageInset, 0, pageInset + 2, 0);
     fields->setSpacing(8);
     status_ = label(QString(), content, "muted");
     status_->setWordWrap(true);
@@ -1760,7 +1795,7 @@ void ClientWindow::showPendingDetail(bool back) {
     if (!detailPage_) {
         detailPage_ = surface(pages_, "detailPage");
         detailLayout_ = pageLayout(detailPage_);
-        QHBoxLayout* heading = new QHBoxLayout;
+        detailHeading_ = new QHBoxLayout;
         detailBack_ = button(QString(), detailPage_);
         detailBack_->setObjectName(QLatin1String("detailBack"));
         detailBack_->setProperty("accessibleName", ui("Назад"));
@@ -1769,12 +1804,17 @@ void ClientWindow::showPendingDetail(bool back) {
         detailTitle_ = label(QString(), detailPage_, "subtitle");
         detailTitle_->setWordWrap(true);
         detailTitle_->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-        heading->addWidget(detailBack_);
-        heading->addWidget(detailTitle_, 1);
-        detailLayout_->addLayout(heading);
+        detailHeading_->addWidget(detailBack_);
+        detailHeading_->addWidget(detailTitle_, 1);
+        detailLayout_->addLayout(detailHeading_);
         pages_->addWidget(detailPage_);
         connect(detailBack_, SIGNAL(clicked()), this, SLOT(returnToDashboard()));
     }
+    const bool reachesEdge = qobject_cast<QAbstractScrollArea*>(content) ||
+                             content->property("detailScrollToEdge").toBool();
+    const int margin = reachesEdge ? 0 : pageInset;
+    detailLayout_->setContentsMargins(margin, 12, margin, 10);
+    detailHeading_->setContentsMargins(pageInset - margin, 0, pageInset - margin, 0);
     if (detailContent_.data() != content) {
         QWidget* previous = takeDetail();
         if (previous) {
@@ -1782,6 +1822,17 @@ void ClientWindow::showPendingDetail(bool back) {
                 previous->deleteLater();
             else
                 detailHistory_.append(DetailEntry{previous, detailTitle_->text()});
+        }
+        if (auto* scroll = qobject_cast<QScrollArea*>(content)) {
+            if (QWidget* body = scroll->widget()) {
+                // Insets belong inside the scrolling widget once it reaches the screen edge.
+                if (!scroll->property("detailScrollToEdge").toBool()) {
+                    const QMargins padding = body->contentsMargins();
+                    body->setContentsMargins(padding.left() + pageInset, padding.top(),
+                                             padding.right() + pageInset, padding.bottom());
+                    scroll->setProperty("detailScrollToEdge", true);
+                }
+            }
         }
         detailContent_ = content;
         detailLayout_->addWidget(content, 1);
@@ -1822,12 +1873,14 @@ void ClientWindow::makeChatChooser() {
     }
 
     QWidget* panel = surface(this, "newChatView");
+    panel->setProperty("detailScrollToEdge", true);
     QVBoxLayout* layout = new QVBoxLayout(panel);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(8);
+    auto* header = insetColumn(layout, pageInset);
     chooserSearch_ = searchBox(ui("Найти контакт или канал"), panel);
     chooserSearch_->setObjectName(QLatin1String("newChatSearch"));
-    layout->addWidget(chooserSearch_.data());
+    header->addWidget(chooserSearch_.data());
 
     const char* captions[] = {"Все", "Личные", "Каналы"};
     const char* objectNames[] = {"newChatAll", "newChatDirect", "newChatChannels"};
@@ -1841,17 +1894,17 @@ void ClientWindow::makeChatChooser() {
         kinds->addButton(filter, n);
         filters->addWidget(filter, 1);
     }
-    layout->addLayout(filters);
+    header->addLayout(filters);
     chooserEmpty_ = label(QString(), panel, "muted");
     chooserEmpty_->setWordWrap(true);
     chooserEmpty_->setAlignment(Qt::AlignCenter);
-    layout->addWidget(chooserEmpty_.data());
-    chooser_ = makeList(panel, ui("Контакты и каналы"));
+    header->addWidget(chooserEmpty_.data());
+    chooser_ = makeList(panel, ui("Контакты и каналы"), pageInset);
     chooser_->setObjectName(QLatin1String("newChatTargets"));
     layout->addWidget(chooser_.data(), 1);
     chooserChannels_ = button(ui("Добавить канал"), panel);
     chooserChannels_->setObjectName(QLatin1String("newChatRadioChannels"));
-    layout->addWidget(chooserChannels_.data());
+    insetColumn(layout, pageInset)->addWidget(chooserChannels_.data());
 
     chooserKind_ = 0;
     updateChatChooser(targets);

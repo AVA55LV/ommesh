@@ -5,14 +5,17 @@
 
 #include <memory>
 
+enum class TileProvider;
+
 class LocalTileProxy {
 public:
     LocalTileProxy();
     ~LocalTileProxy();
 
-    bool start(bool allowUntrustedCa, QString* error = nullptr);
+    bool start(TileProvider provider, bool allowUntrustedCa, QString* error = nullptr);
     void stop();
     bool running() const;
+    bool ready() const;
     QString baseUrl() const;
     QString lastError() const;
 
